@@ -221,3 +221,23 @@ if not st.session_state.scan_data.empty:
             st.subheader("ℹ️ Şirket Özeti")
             try:
                 row = df[df['Ticker'] == selected_ticker].iloc[0]
+                
+                # Rasyoları sayıya çevirmeyi deneyelim (Formatlama için)
+                try:
+                    curr_price = float(row.get('Price', 0))
+                except: curr_price = 0
+                
+                st.write(f"**Şirket:** {row['Company']}")
+                st.write(f"**Sektör:** {row['Sector']}")
+                st.write(f"**Endüstri:** {row['Industry']}")
+                st.divider()
+                st.metric("Fiyat", f"${curr_price}")
+                st.metric("F/K (P/E)", row.get('P/E', '-'))
+                st.metric("Değişim", row.get('Change', '-'))
+                st.metric("Piyasa Değ.", row.get('Market Cap', '-'))
+                
+            except:
+                st.write("Veri okunamadı.")
+
+elif st.session_state.scan_data.empty:
+    st.info("👈 Sol menüden 'Tarama Limiti'ni ve diğer kriterleri seçip 'Sonuçları Getir'e basınız.")
