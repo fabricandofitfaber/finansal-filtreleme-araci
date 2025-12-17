@@ -8,21 +8,17 @@ import time
 import numpy as np
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Buffett Analiz v11", layout="wide")
-st.title("📊 Akıllı Hisse Analizörü (Buffett Modu)")
-st.markdown("""
-**Felsefe:** "Harika bir şirketi makul fiyata almak, vasat bir şirketi harika fiyata almaktan iyidir."
-**Özellik:** Temel Veri + Teknik Trend + **Otomatik Yorumlama**
-""")
+st.set_page_config(page_title="Buffett Analiz v11.1", layout="wide")
+st.title("📊 Akıllı Hisse Analizörü (Hata Korumalı)")
+st.markdown("**Durum:** Yahoo Finance 'Rate Limit' hatasına karşı korumalı mod.")
 
 # --- Session State ---
 if 'scan_data' not in st.session_state:
     st.session_state.scan_data = pd.DataFrame()
 
-# --- YARDIMCI FONKSİYONLAR (Finansal Okuryazarlık Modülü) ---
+# --- YARDIMCI FONKSİYONLAR ---
 
 def calculate_rsi(data, window=14):
-    """Göreceli Güç Endeksi (RSI) Hesaplar"""
     delta = data['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
@@ -30,61 +26,59 @@ def calculate_rsi(data, window=14):
     return 100 - (100 / (1 + rs))
 
 def generate_commentary(ticker, row, history, info):
-    """
-    Bu fonksiyon, verileri insan diline çeviren 'Yapay Yatırım Komitesi'dir.
-    """
+    """Yatırım Komitesi Yorumlayıcısı"""
     comments = []
     score = 0
     
-    # 1. TEMEL ANALİZ (Warren Buffett Bakışı)
-    pe = float(row.get('P/E', 0)) if str(row.get('P/E', '-')) != '-' else 0
-    price = float(row.get('Price', 0)) if str(row.get('Price', '-')) != '-' else 0
-    
-    # Değerleme Yorumu
-    if 0 < pe < 15:
-        comments.append(f"🟢 **Değerleme:** Şirket {pe} F/K oranı ile oldukça ucuz fiyatlanıyor. Bu, değer yatırımı için cazip bir giriş noktası olabilir.")
-        score += 1
-    elif 15 <= pe < 25:
-        comments.append(f"🟡 **Değerleme:** Fiyat makul seviyelerde ({pe} F/K). Ne çok ucuz ne çok pahalı.")
-    elif pe >= 25:
-        comments.append(f"🔴 **Değerleme:** Piyasa bu şirketten yüksek büyüme bekliyor ({pe} F/K). Hata payı düşük, dikkatli olunmalı.")
+    # Veri kontrolü (Boş gelirse işlem yapma)
+    if history.empty:
+        return ["Veri alınamadığı için yorum yapılamıyor."], 0, 0
 
-    # Kârlılık (Yahoo Info'dan)
-    roe = info.get('returnOnEquity', 0)
-    if roe > 0.15:
-        comments.append(f"🟢 **Kalite (Moat):** Şirketin Özkaynak Kârlılığı (ROE) %{roe*100:.1f} seviyesinde. Buffett bu tür 'sermayeyi verimli kullanan' şirketleri sever.")
-        score += 1
-    elif roe < 0.05:
-        comments.append(f"🔴 **Kalite:** Şirket sermayesini verimli kullanamıyor (ROE: %{roe*100:.1f}). Rekabet avantajı zayıf olabilir.")
-
-    # Borçluluk
-    debt_eq = info.get('debtToEquity', 0)
-    if debt_eq and debt_eq < 50: # %50 altı
-        comments.append("🟢 **Finansal Sağlık:** Borçluluk oranı düşük. Kriz dönemlerine karşı dayanıklı bir bilanço.")
-        score += 1
-    elif debt_eq and debt_eq > 150:
-        comments.append("🔴 **Risk:** Şirketin borç yükü yüksek. Faiz oranlarının arttığı ortamda kâr baskılanabilir.")
-
-    # 2. TEKNİK ANALİZ (Zamanlama)
-    # Son kapanış fiyatı 50 ve 200 günlük ortalamaya göre nerede?
-    ma50 = history['Close'].rolling(50).mean().iloc[-1]
-    ma200 = history['Close'].rolling(200).mean().iloc[-1]
-    current_price = history['Close'].iloc[-1]
-    
-    if current_price > ma200:
-        comments.append("📈 **Trend:** Fiyat 200 günlük ortalamasının üzerinde, uzun vadeli trend 'Yükseliş' yönünde.")
-        score += 1
-    else:
-        comments.append("📉 **Trend:** Fiyat 200 günlük ortalamasının altında, hisse 'Düşüş' trendinde veya baskı altında.")
-
-    # RSI Durumu
-    rsi = calculate_rsi(history).iloc[-1]
-    if rsi < 30:
-        comments.append(f"💎 **Fırsat:** RSI {rsi:.0f} seviyesinde (Aşırı Satım). Teknik olarak tepki yükselişi gelebilir.")
-    elif rsi > 70:
-        comments.append(f"⚠️ **Uyarı:** RSI {rsi:.0f} seviyesinde (Aşırı Alım). Kısa vadede bir düzeltme yaşanabilir.")
+    try:
+        # 1. TEMEL ANALİZ
+        pe_str = str(row.get('P/E', '-'))
+        pe = float(pe_str) if pe_str != '-' else 0
         
-    return comments, score, rsi
+        # Değerleme
+        if 0 < pe < 15:
+            comments.append(f"🟢 **Değerleme:** {pe} F/K ile makul/ucuz seviyede.")
+            score += 1
+        elif 15 <= pe < 25:
+            comments.append(f"🟡 **Değerleme:** {pe} F/K ile piyasa ortalamasında.")
+        elif pe >= 25:
+            comments.append(f"🔴 **Değerleme:** {pe} F/K ile primli fiyatlanıyor.")
+
+        # Kârlılık (Hata korumalı)
+        roe = info.get('returnOnEquity', 0)
+        if roe is not None and roe > 0.15:
+            comments.append(f"🟢 **Kalite:** ROE %{roe*100:.1f} ile güçlü sermaye kârlılığı.")
+            score += 1
+        
+        # Borç
+        debt_eq = info.get('debtToEquity', None)
+        if debt_eq and debt_eq < 50:
+            comments.append("🟢 **Sağlık:** Düşük borçluluk yapısı.")
+            score += 1
+
+        # 2. TEKNİK ANALİZ
+        if len(history) > 200:
+            ma200 = history['Close'].rolling(200).mean().iloc[-1]
+            curr = history['Close'].iloc[-1]
+            if curr > ma200:
+                comments.append("📈 **Trend:** Fiyat 200 günlük ortalamanın üzerinde (Pozitif).")
+                score += 1
+            else:
+                comments.append("📉 **Trend:** Fiyat 200 günlük ortalamanın altında (Negatif).")
+
+        # RSI
+        rsi = calculate_rsi(history).iloc[-1]
+        if rsi < 30: comments.append(f"💎 **RSI:** {rsi:.0f} (Aşırı Satım Bölgesi).")
+        elif rsi > 70: comments.append(f"⚠️ **RSI:** {rsi:.0f} (Aşırı Alım Bölgesi).")
+        
+    except Exception as e:
+        comments.append(f"Yorumlama sırasında hata: {str(e)}")
+        
+    return comments, score, 0
 
 # --- Yan Menü ---
 st.sidebar.header("🔍 Kriterler")
@@ -98,7 +92,7 @@ pe_ratio = st.sidebar.selectbox("F/K Oranı", ["Any", "Low (<15)", "Under 20", "
 roe = st.sidebar.selectbox("ROE", ["Any", "Positive (>0%)", "High (>15%)", "Very High (>20%)", "Over 30%"], index=0)
 dividend = st.sidebar.selectbox("Temettü", ["Any", "Positive (>0%)", "High (>5%)", "Over 2%"], index=0)
 
-# --- Veri Motoru ---
+# --- Veri Motoru (Finviz) ---
 def get_finviz_data(limit_count, exc, sec, mc, pe, roe_val, div):
     filters = []
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
@@ -165,8 +159,12 @@ if not st.session_state.scan_data.empty:
     st.dataframe(df, use_container_width=True)
     st.divider()
     
-    # --- BUFFETT ANALİZ MODÜLÜ ---
     col1, col2 = st.columns([2, 1])
+    
+    # --- DEĞİŞKENLERİ ÖNCEDEN TANIMLA (NameError Koruması) ---
+    hist = pd.DataFrame()
+    comments = []
+    score = 0
     
     with col1:
         st.subheader("📉 Teknik & Getiri")
@@ -174,8 +172,12 @@ if not st.session_state.scan_data.empty:
         
         if tik:
             try:
+                # Yahoo'dan Veri Çekme (Rate Limit Riskli Bölge)
                 hist = yf.download(tik, period="1y", progress=False)
-                if isinstance(hist.columns, pd.MultiIndex): hist.columns = hist.columns.get_level_values(0)
+                
+                # Sütun Düzeltme
+                if isinstance(hist.columns, pd.MultiIndex): 
+                    hist.columns = hist.columns.get_level_values(0)
                 hist.columns = [c.capitalize() for c in hist.columns]
                 
                 if not hist.empty:
@@ -188,17 +190,23 @@ if not st.session_state.scan_data.empty:
                     fig.update_layout(title=f"{tik} - Kümülatif Getiri (%)", height=400)
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Verileri Hazırla
-                    row = df[df['Ticker'] == tik].iloc[0]
-                    t_info = yf.Ticker(tik).info
-                    
-                    # YORUM OLUŞTUR
-                    comments, score, rsi_val = generate_commentary(tik, row, hist, t_info)
-                    
-                else: st.warning("Grafik verisi yok.")
-            except Exception as e: st.error(f"Hata: {e}")
+                    # Verileri Hesapla (Hata korumalı blok)
+                    try:
+                        row = df[df['Ticker'] == tik].iloc[0]
+                        t_info = yf.Ticker(tik).info
+                        comments, score, rsi_val = generate_commentary(tik, row, hist, t_info)
+                    except Exception as e:
+                        st.warning(f"Yahoo detay verisi çekilemedi (Rate Limit): {e}")
+                        score = 0
+                        comments = ["Veri çekilemediği için analiz yapılamadı."]
+                        
+                else: 
+                    st.warning("Grafik verisi boş geldi.")
+            except Exception as e: 
+                st.error(f"Bağlantı Hatası: {e}")
 
     with col2:
+        # Eğer veri başarıyla çekildiyse ve hist boş değilse göster
         if tik and not hist.empty:
             st.subheader("🧐 Akıllı Yatırım Özeti")
             
@@ -208,14 +216,15 @@ if not st.session_state.scan_data.empty:
             st.markdown(f"### {stars} ({score}/4)")
             
             st.markdown("---")
-            st.markdown("#### 🧠 Neden Bu Hisse?")
+            st.markdown("#### 🧠 Analiz Notları")
             
-            # Üretilen Yorumları Yazdır
             for comment in comments:
                 st.markdown(comment)
-                
-            st.markdown("---")
-            st.caption("Not: Bu analiz algoritma tarafından üretilmiştir ve yatırım tavsiyesi değildir.")
             
+            st.markdown("---")
+            st.caption("Yapay zeka destekli yorum modülü.")
+        elif tik:
+             st.info("Veriler yüklenemediği için özet oluşturulamadı. Lütfen birkaç saniye bekleyip tekrar deneyin (Rate Limit).")
+
 elif st.session_state.scan_data.empty:
     st.info("Sol menüden kriterleri seçip 'Sonuçları Getir' butonuna basın.")
