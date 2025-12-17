@@ -4,103 +4,171 @@ import yfinance as yf
 import requests
 import plotly.graph_objects as go
 
-# --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Hassas Filtreleme", layout="wide")
-st.title("📊 Kantitatif Hisse Tarama ve Analiz")
+# --- Sayfa Yapılandırması ---
+st.set_page_config(page_title="Gelişmiş Finansal Tarama", layout="wide")
+st.title("📊 Akademik Düzey Hisse Senedi Analiz Platformu")
+st.markdown("Veri Kaynağı: **Finviz** (Temel) & **Yahoo Finance** (Teknik)")
 
-# --- Veri Çekme Fonksiyonu (Geniş Kapsamlı) ---
+# --- Yan Menü (Genişletilmiş Filtreler) ---
+st.sidebar.header("🔍 Filtreleme Kriterleri")
+
+# 1. Sektör Seçimi (Tam Liste)
+sector_list = [
+    "Any", "Basic Materials", "Communication Services", "Consumer Cyclical", 
+    "Consumer Defensive", "Energy", "Financial", "Healthcare", 
+    "Industrials", "Real Estate", "Technology", "Utilities"
+]
+sector = st.sidebar.selectbox("Sektör", sector_list, index=0)
+
+# 2. Piyasa Değeri (Market Cap)
+mcap = st.sidebar.selectbox("Piyasa Değeri", 
+    ["Any", "Mega ($200bln+)", "Large ($10bln+)", "Mid ($2bln+)", "Small ($300mln+)"], index=0)
+
+# 3. Değerleme Rasyoları (Valuation)
+pe_ratio = st.sidebar.selectbox("F/K Oranı (P/E)", 
+    ["Any", "Low (<15)", "Under 20", "Under 25", "Under 30", "High (>50)"], index=0)
+
+# 4. Kârlılık (Profitability)
+roe = st.sidebar.selectbox("Özkaynak Kârlılığı (ROE)", 
+    ["Any", "Positive (>0%)", "High (>15%)", "Very High (>20%)"], index=0)
+
+# 5. Finansal Sağlık (Financial Health)
+debt_equity = st.sidebar.selectbox("Borç / Özkaynak", 
+    ["Any", "Low (<0.1)", "Under 0.5", "Under 1"], index=0)
+
+# 6. Temettü (Dividend)
+dividend = st.sidebar.selectbox("Temettü Verimi", 
+    ["Any", "Positive (>0%)", "High (>5%)", "Very High (>10%)"], index=0)
+
+# --- Veri Çekme Motoru (Scraper) ---
 @st.cache_data
-def get_raw_data(sector):
-    # Sektör Mapping
-    sec_map = {
-        "Technology": "sec_technology", "Financial": "sec_financial", 
-        "Energy": "sec_energy", "Healthcare": "sec_healthcare",
-        "Basic Materials": "sec_basicmaterials", "Industrials": "sec_industrials",
-        "Consumer Cyclical": "sec_consumercyclical", "Real Estate": "sec_realestate"
-    }
+def get_finviz_data(sec, mc, pe, roe_val, de, div):
+    filters = []
     
-    # URL: Sadece sektörü seçiyoruz, rasyo filtrelerini bilerek boş bırakıyoruz (Ham veri almak için)
-    # v=111: Genel Bakış (Overview) tablosunu getirir.
-    base_url = f"https://finviz.com/screener.ashx?v=111&s={sec_map.get(sector, 'sec_technology')}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    # URL Parametre Haritalama (Mapping)
+    # Sektör
+    if sec != "Any":
+        sec_map = {
+            "Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices",
+            "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive",
+            "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare",
+            "Industrials": "sec_industrials", "Real Estate": "sec_realestate",
+            "Technology": "sec_technology", "Utilities": "sec_utilities"
+        }
+        filters.append(f"s={sec_map.get(sec, '')}")
+
+    # Market Cap
+    if mc == "Mega ($200bln+)": filters.append("cap_mega")
+    elif mc == "Large ($10bln+)": filters.append("cap_large")
+    elif mc == "Mid ($2bln+)": filters.append("cap_mid")
+    elif mc == "Small ($300mln+)": filters.append("cap_small")
+
+    # F/K
+    if pe == "Low (<15)": filters.append("fa_pe_u15")
+    elif pe == "Under 20": filters.append("fa_pe_u20")
+    elif pe == "Under 25": filters.append("fa_pe_u25")
+    elif pe == "Under 30": filters.append("fa_pe_u30")
+    elif pe == "High (>50)": filters.append("fa_pe_o50")
+
+    # ROE
+    if roe == "Positive (>0%)": filters.append("fa_roe_pos")
+    elif roe == "High (>15%)": filters.append("fa_roe_o15")
+    elif roe == "Very High (>20%)": filters.append("fa_roe_o20")
+
+    # Debt/Equity
+    if de == "Low (<0.1)": filters.append("fa_debteq_u0.1")
+    elif de == "Under 0.5": filters.append("fa_debteq_u0.5")
+    elif de == "Under 1": filters.append("fa_debteq_u1")
+    
+    # Dividend
+    if div == "Positive (>0%)": filters.append("fa_div_pos")
+    elif div == "High (>5%)": filters.append("fa_div_o5")
+    elif div == "Very High (>10%)": filters.append("fa_div_o10")
+
+    # URL Oluşturma
+    filter_string = ",".join(filters)
+    base_url = f"https://finviz.com/screener.ashx?v=111&f={filter_string}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
     
     try:
         response = requests.get(base_url, headers=headers)
-        # 'match' parametresini 'P/E' yaparak doğru tabloyu hedefliyoruz
-        dfs = pd.read_html(response.text, match="P/E")
+        # Match parametresini 'Ticker' yaptık, çünkü her tabloda mutlaka Ticker vardır.
+        dfs = pd.read_html(response.text, match="Ticker")
         df = dfs[0]
         
-        # Veri Temizliği (Data Cleaning) - String'i Sayıya Çevirme
-        # Finviz bazen verileri '-' olarak gösterir, bunları NaN yaparız.
-        cols_to_numeric = ['P/E', 'Price', 'Change', 'Volume']
-        
-        # Sütun isimlerini akademik standarta getirelim
-        df.rename(columns={'P/E': 'FK', 'Price': 'Fiyat', 'Change': 'Degisim'}, inplace=True)
-        
-        for col in ['FK', 'Fiyat']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-        return df[['Ticker', 'Company', 'Sector', 'FK', 'Fiyat', 'Degisim', 'Volume']]
+        # Sütunları Temizle ve Seç
+        # Finviz sütun adlarını kontrol edelim
+        wanted_cols = ['Ticker', 'Company', 'Sector', 'P/E', 'Price', 'Change', 'Volume']
+        # Mevcut sütunlarla kesişimini al (Hata vermemesi için)
+        available_cols = [c for c in wanted_cols if c in df.columns]
+        return df[available_cols], base_url
     except Exception as e:
-        st.error(f"Veri çekme hatası: {e}")
-        return pd.DataFrame()
+        st.error(f"Veri çekme hatası: {str(e)}")
+        return pd.DataFrame(), base_url
 
-# --- Yan Menü (Sidebar) ---
-st.sidebar.header("🎛️ Parametre Kontrolü")
-
-# 1. Adım: Sektör Seçimi (API'den bu gelecek)
-selected_sector = st.sidebar.selectbox("Sektör Seçiniz", 
-    ["Technology", "Financial", "Energy", "Healthcare", "Basic Materials", "Real Estate"])
-
-# Veriyi Çek
-df_raw = get_raw_data(selected_sector)
-
-if not df_raw.empty:
-    # 2. Adım: Python İçinde Hassas Filtreleme (Sürekli Değişkenler)
-    st.sidebar.subheader("Hassas Filtreler")
+# --- Ana Akış ---
+if st.sidebar.button("Sonuçları Getir"):
+    with st.spinner('Finviz veritabanı taranıyor...'):
+        df_results, query_url = get_finviz_data(sector, mcap, pe_ratio, roe, debt_equity, dividend)
     
-    # F/K Filtresi (Slider ile ondalıklı seçim)
-    max_pe_input = st.sidebar.number_input("Maksimum F/K Oranı", min_value=0.0, max_value=200.0, value=25.5, step=0.5)
-    
-    # Fiyat Filtresi
-    min_price, max_price = st.sidebar.slider("Fiyat Aralığı ($)", 0.0, 1000.0, (10.0, 500.0))
-    
-    # --- Filtreleme Mantığı (Pandas filtering) ---
-    # Akademik filtreleme burada gerçekleşiyor:
-    filtered_df = df_raw[
-        (df_raw['FK'] < max_pe_input) & 
-        (df_raw['FK'] > 0) & # Negatif veya yok sayılanları eliyoruz
-        (df_raw['Fiyat'] >= min_price) &
-        (df_raw['Fiyat'] <= max_price)
-    ]
-    
-    # --- Sonuç Ekranı ---
-    col1, col2 = st.columns([3, 1])
-    
-    with col1:
-        st.subheader(f"Tarama Sonuçları ({len(filtered_df)} Şirket)")
-        st.dataframe(filtered_df, use_container_width=True)
-
-    with col2:
-        st.markdown("### İstatistikler")
-        st.write(f"**Ortalama F/K:** {filtered_df['FK'].mean():.2f}")
-        st.write(f"**Medyan Fiyat:** ${filtered_df['Fiyat'].median():.2f}")
-
-    # --- Grafik Bölümü ---
-    st.divider()
-    if not filtered_df.empty:
-        ticker_select = st.selectbox("Teknik Analiz için Şirket Seç:", filtered_df['Ticker'].tolist())
+    if not df_results.empty:
+        # Sonuç Sayısı
+        st.success(f"Kriterlere uyan **{len(df_results)}** şirket bulundu.")
         
-        if ticker_select:
-            with st.spinner(f'{ticker_select} verileri indiriliyor...'):
-                stock_data = yf.download(ticker_select, period="6mo", progress=False)
-                
-                fig = go.Figure()
-                fig.add_trace(go.Candlestick(x=stock_data.index,
-                                open=stock_data['Open'], high=stock_data['High'],
-                                low=stock_data['Low'], close=stock_data['Close'],
-                                name=ticker_select))
-                fig.update_layout(title=f"{ticker_select} Fiyat Grafiği", height=500)
-                st.plotly_chart(fig, use_container_width=True)
+        # Tabloyu Göster
+        st.dataframe(df_results, use_container_width=True)
+        st.markdown(f"[Finviz'de Görüntüle]({query_url})") # Doğrulama linki
+        
+        st.markdown("---")
+        
+        # Grafik Bölümü
+        col_graph, col_info = st.columns([3, 1])
+        
+        with col_graph:
+            st.subheader("📈 Teknik Analiz")
+            selected_ticker = st.selectbox("Grafik için Şirket Seç:", df_results['Ticker'].tolist())
+            
+            if selected_ticker:
+                try:
+                    # Yahoo Finance'den Veri
+                    stock_data = yf.download(selected_ticker, period="1y", progress=False)
+                    
+                    if not stock_data.empty:
+                        fig = go.Figure()
+                        fig.add_trace(go.Candlestick(x=stock_data.index,
+                                        open=stock_data['Open'], high=stock_data['High'],
+                                        low=stock_data['Low'], close=stock_data['Close'],
+                                        name=selected_ticker))
+                        fig.update_layout(title=f"{selected_ticker} - Günlük Grafik", height=500)
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("Grafik verisi bulunamadı.")
+                except Exception as e:
+                    st.error(f"Grafik hatası: {e}")
+
+        with col_info:
+            if selected_ticker:
+                st.subheader("🏢 Şirket Profili")
+                try:
+                    info = yf.Ticker(selected_ticker).info
+                    st.write(f"**Sektör:** {info.get('sector', '-')}")
+                    st.write(f"**Endüstri:** {info.get('industry', '-')}")
+                    st.write(f"**Beta:** {info.get('beta', '-')}")
+                    
+                    # Hedef Fiyat Analizi
+                    current = info.get('currentPrice', 0)
+                    target = info.get('targetMeanPrice', 0)
+                    if current and target:
+                        potansiyel = ((target - current) / current) * 100
+                        color = "green" if potansiyel > 0 else "red"
+                        st.markdown(f"**Analist Hedefi:** ${target}")
+                        st.markdown(f"**Potansiyel:** :{color}[%{potansiyel:.2f}]")
+                        
+                except:
+                    st.write("Detay bilgi alınamadı.")
+
+    else:
+        st.error("⚠️ Sonuç bulunamadı.")
+        st.info("İpucu: Finviz bazen aşırı filtrelemede sonuç vermeyebilir veya bot korumasına takılmış olabilir. 'Any' seçeneklerini artırıp tekrar deneyin.")
 else:
-    st.warning("Veri çekilemedi veya tablo bulunamadı.")
+    st.info("👈 Lütfen sol menüden kriterleri seçip 'Sonuçları Getir' butonuna basın.")
