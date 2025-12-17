@@ -1,182 +1,193 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
-import requests
 import plotly.graph_objects as go
+import time
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Tarama v5.0", layout="wide")
-st.title("📊 Akademik Düzey Hisse Tarama (Bot Korumalı)")
+st.set_page_config(page_title="S&P 500 Tam Tarama", layout="wide")
+st.title("📊 Akademik Piyasa Analizörü: S&P 500")
 st.markdown("""
-**Durum:** Bu sistem Finviz bot korumasını aşmak için 'Browser Spoofing' ve 'Pattern Matching' tekniklerini kullanır.
+Bu program, statik bir liste yerine **Wikipedia üzerinden güncel S&P 500 endeksini** çeker ve analiz eder.
+*Veri Kaynağı: Wikipedia (Ticker Listesi) + Yahoo Finance (Finansal Veriler)*
 """)
 
-# --- Session State ---
-if 'data' not in st.session_state:
-    st.session_state.data = pd.DataFrame()
+# --- 1. ADIM: Dinamik Hisse Listesi (Wikipedia) ---
+@st.cache_data
+def get_sp500_tickers():
+    try:
+        url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+        tables = pd.read_html(url)
+        # Wikipedia'daki ilk tablo her zaman S&P 500 listesidir
+        df = tables[0]
+        tickers = df['Symbol'].tolist()
+        
+        # Yahoo Finance için bazı ticker düzeltmeleri (Örn: BRK.B -> BRK-B)
+        tickers = [t.replace('.', '-') for t in tickers]
+        return tickers
+    except Exception as e:
+        st.error(f"Liste çekilemedi: {e}")
+        # Acil durum listesi (Fallback)
+        return ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA"]
 
-# --- Yan Menü ---
-st.sidebar.header("🎛️ Filtreler")
-
-# 1. Sektör
-sector_list = [
-    "Any", "Basic Materials", "Communication Services", "Consumer Cyclical", 
-    "Consumer Defensive", "Energy", "Financial", "Healthcare", 
-    "Industrials", "Real Estate", "Technology", "Utilities"
-]
-sector = st.sidebar.selectbox("Sektör", sector_list, index=10)
-
-# 2. Hassas F/K (Slider)
-target_pe = st.sidebar.slider("Maksimum F/K (P/E)", 0.0, 100.0, 25.0, 0.5)
-
-# 3. Hassas ROE (Slider)
-target_roe = st.sidebar.slider("Minimum ROE (%)", 0.0, 50.0, 15.0, 1.0)
-
-# 4. Piyasa Değeri
-mcap = st.sidebar.selectbox("Piyasa Değeri", ["Any", "Large ($10bln+)", "Mid ($2bln+)", "Small ($300mln+)"], index=0)
-
-# --- Veri Motoru ---
-def get_data_v5(sec, mc, user_pe, user_roe):
-    # Filtreleri Hazırla
-    filters = []
+# --- 2. ADIM: Veri Çekme Motoru ---
+def fetch_market_data(ticker_list, limit):
+    data = []
     
-    # Sektör Mapping
-    sec_map = {
-        "Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices",
-        "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive",
-        "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare",
-        "Industrials": "sec_industrials", "Real Estate": "sec_realestate",
-        "Technology": "sec_technology", "Utilities": "sec_utilities"
-    }
-    if sec != "Any": filters.append(f"s={sec_map[sec]}")
-
-    # Market Cap
-    if mc == "Large ($10bln+)": filters.append("cap_large")
-    elif mc == "Mid ($2bln+)": filters.append("cap_mid")
-    elif mc == "Small ($300mln+)": filters.append("cap_small")
-
-    # F/K Funnel (Daraltma)
-    if user_pe < 15: filters.append("fa_pe_u15")
-    elif user_pe < 25: filters.append("fa_pe_u25")
-    elif user_pe < 50: filters.append("fa_pe_u50")
+    # İlerleme Çubuğu
+    progress_text = "Piyasa taranıyor. Bu işlem canlı veri çektiği için zaman alabilir..."
+    my_bar = st.progress(0, text=progress_text)
     
-    # ROE Funnel
-    if user_roe > 0: filters.append("fa_roe_pos")
-    if user_roe > 15: filters.append("fa_roe_o15")
-
-    filter_str = ",".join(filters)
+    # Kullanıcının seçtiği limit kadar hisseyi tara
+    target_list = ticker_list[:limit]
     
-    # --- İSTEK ATMA (Bot Koruması Önlemi) ---
-    # Gerçek bir Chrome tarayıcısı taklidi yapıyoruz
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://finviz.com/'
-    }
-    
-    all_dfs = []
-    # İlk 2 sayfayı (40 hisse) tarayalım
-    pages = [1, 21] 
-    
-    status_msg = st.empty()
-    
-    for i, start_row in enumerate(pages):
+    for i, ticker in enumerate(target_list):
         try:
-            url = f"https://finviz.com/screener.ashx?v=111&f={filter_str}&r={start_row}"
+            # Yahoo'dan 'Info' çekmek en maliyetli işlemdir, yavaş ama detaylıdır.
+            stock = yf.Ticker(ticker)
+            info = stock.info
             
-            # Request
-            r = requests.get(url, headers=headers, timeout=10)
+            # Sadece temel verileri alıyoruz
+            stock_data = {
+                'Ticker': ticker,
+                'Şirket': info.get('shortName', 'N/A'),
+                'Sektör': info.get('sector', 'Bilinmiyor'),
+                'Fiyat ($)': info.get('currentPrice', 0),
+                'F/K': info.get('trailingPE', 0),
+                'İleri F/K': info.get('forwardPE', 0),
+                'ROE (%)': (info.get('returnOnEquity', 0) or 0) * 100,
+                'Borç/Özkaynak': info.get('debtToEquity', 0) / 100 if info.get('debtToEquity') else 0,
+                'Temettü (%)': (info.get('dividendYield', 0) or 0) * 100,
+                'Hedef Fiyat': info.get('targetMeanPrice', 0)
+            }
             
-            # Hata Kontrolü (403 Forbidden vb.)
-            if r.status_code != 200:
-                st.error(f"⚠️ Bağlantı Hatası: Sunucu {r.status_code} kodu döndürdü. (Bot koruması olabilir)")
-                break
-            
-            # --- TABLO AYRIŞTIRMA (Sihirli Kısım) ---
-            # match="Ticker" parametresi: İçinde 'Ticker' kelimesi geçen tabloyu bulur.
-            # Bu sayede menü yazılarını, reklamları vs. atlar.
-            dfs = pd.read_html(r.text, match="Ticker", header=0)
-            
-            if len(dfs) > 0:
-                df = dfs[0]
-                # Sütun kontrolü (Garantiye almak için)
-                if 'Ticker' in df.columns and 'Price' in df.columns:
-                    all_dfs.append(df)
-            else:
-                # Tablo yoksa sayfa boştur
-                break
+            # Veri temizliği: Sadece anlamlı verisi olanları ekle
+            if stock_data['Fiyat ($)'] > 0:
+                data.append(stock_data)
                 
-        except ValueError as ve:
-            # "No tables found" hatası gelirse buraya düşer
-            if i == 0: st.warning("Finviz tablosu bulunamadı. Filtreler çok sıkı olabilir.")
-            break
-        except Exception as e:
-            st.error(f"Beklenmedik Hata: {e}")
-            break
+            # İlerleme çubuğunu güncelle
+            my_bar.progress((i + 1) / len(target_list), text=f"Taranıyor: {ticker}")
             
-    status_msg.empty()
-    
-    if all_dfs:
-        final_df = pd.concat(all_dfs).drop_duplicates(subset=['Ticker'])
-        
-        # Sayısal Dönüşüm
-        for col in ['P/E', 'Price', 'Change', 'Volume']:
-            if col in final_df.columns:
-                final_df[col] = pd.to_numeric(final_df[col], errors='coerce')
-        
-        return final_df
-    return pd.DataFrame()
-
-# --- Ana Akış ---
-if st.sidebar.button("Taramayı Başlat"):
-    with st.spinner('Veriler çekiliyor...'):
-        raw_df = get_data_v5(sector, mcap, target_pe, target_roe)
-        
-        if not raw_df.empty:
-            # Python tarafında hassas eleme
-            filtered_df = raw_df[
-                (raw_df['P/E'] <= target_pe) & 
-                (raw_df['P/E'] > 0)
-            ]
-            # ROE verisi Overview tablosunda gelmediği için (Finviz kısıtı),
-            # ROE filtresini sadece "Giriş" aşamasında yapabiliyoruz.
+        except Exception:
+            continue # Hata veren hisseyi atla
             
-            st.session_state.data = filtered_df
-        else:
-            st.session_state.data = pd.DataFrame()
+    my_bar.empty()
+    return pd.DataFrame(data)
 
-# --- Gösterim ---
-df_display = st.session_state.data
+# --- Arayüz ve Kontroller ---
 
-if not df_display.empty:
-    st.success(f"✅ {len(df_display)} şirket bulundu.")
-    st.dataframe(df_display, use_container_width=True)
+# Önce listeyi çek
+all_tickers = get_sp500_tickers()
+
+st.sidebar.header("⚙️ Tarama Ayarları")
+
+# Tarama Derinliği (Hız vs Kapsam Dengesi)
+scan_limit = st.sidebar.slider(
+    "Tarama Derinliği (Hisse Sayısı)", 
+    min_value=10, 
+    max_value=len(all_tickers), 
+    value=50, 
+    step=10,
+    help="Yahoo Finance API hızı sınırlıdır. Tüm endeksi (500+) taramak 10-15 dakika sürebilir. Hızlı sonuç için 50-100 arası seçiniz."
+)
+
+if st.sidebar.button("Canlı Taramayı Başlat"):
+    with st.spinner(f'{scan_limit} adet hisse senedi canlı analiz ediliyor...'):
+        # Veriyi çek
+        raw_df = fetch_market_data(all_tickers, scan_limit)
+        # Session state'e kaydet
+        st.session_state.market_data = raw_df
+
+# --- Veri Varsa Göster ---
+if 'market_data' in st.session_state and not st.session_state.market_data.empty:
+    df = st.session_state.market_data
     
-    st.divider()
+    st.sidebar.markdown("---")
+    st.sidebar.header("🔍 Sonuçları Filtrele")
     
+    # Dinamik Filtreler (Çekilen veriye göre oluşur)
+    
+    # 1. Sektör
+    available_sectors = ["Tümü"] + sorted(df['Sektör'].unique().tolist())
+    sec_filter = st.sidebar.selectbox("Sektör Filtresi", available_sectors)
+    
+    # 2. F/K Filtresi
+    pe_filter = st.sidebar.slider("Maksimum F/K", 0, 100, 30)
+    
+    # 3. ROE Filtresi
+    roe_filter = st.sidebar.slider("Minimum ROE (%)", 0, 50, 10)
+    
+    # Filtreleme İşlemi
+    filtered_df = df.copy()
+    
+    if sec_filter != "Tümü":
+        filtered_df = filtered_df[filtered_df['Sektör'] == sec_filter]
+        
+    filtered_df = filtered_df[
+        (filtered_df['F/K'] < pe_filter) & 
+        (filtered_df['F/K'] > 0) & # Zarar edenleri ele
+        (filtered_df['ROE (%)'] > roe_filter)
+    ]
+    
+    # --- Ana Ekran ---
+    st.success(f"Analiz Tamamlandı: {len(df)} hisse tarandı, kriterlere uyan **{len(filtered_df)}** hisse listeleniyor.")
+    
+    # Veri Tablosu
+    st.dataframe(
+        filtered_df.style.format({
+            "Fiyat ($)": "{:.2f}",
+            "F/K": "{:.2f}",
+            "İleri F/K": "{:.2f}",
+            "ROE (%)": "{:.2f}%",
+            "Borç/Özkaynak": "{:.2f}",
+            "Temettü (%)": "{:.2f}%",
+            "Hedef Fiyat": "{:.2f}"
+        }),
+        use_container_width=True
+    )
+    
+    st.markdown("---")
+    
+    # --- Grafik ve Detay Analiz ---
     col1, col2 = st.columns([3, 1])
-    with col1:
-        st.subheader("Grafik Analiz")
-        tik = st.selectbox("Hisse Seç:", df_display['Ticker'].astype(str).unique())
-        if tik:
-            d = yf.download(tik, period="1y", progress=False)
-            if not d.empty:
-                fig = go.Figure(data=[go.Candlestick(x=d.index, open=d['Open'], high=d['High'], low=d['Low'], close=d['Close'])])
-                fig.update_layout(height=400, margin=dict(l=0,r=0,t=30,b=0))
-                st.plotly_chart(fig, use_container_width=True)
     
+    with col1:
+        st.subheader("📉 Teknik Analiz")
+        # Filtrelenmiş listeden seçim yap
+        if not filtered_df.empty:
+            selected_ticker = st.selectbox("Grafik için hisse seçiniz:", filtered_df['Ticker'].tolist())
+            
+            if selected_ticker:
+                # Grafik verisi (sadece seçilen için hızlıca çekilir)
+                chart_data = yf.download(selected_ticker, period="1y", progress=False)
+                
+                fig = go.Figure(data=[go.Candlestick(x=chart_data.index,
+                                open=chart_data['Open'], high=chart_data['High'],
+                                low=chart_data['Low'], close=chart_data['Close'],
+                                name=selected_ticker)])
+                fig.update_layout(height=500, title=f"{selected_ticker} Fiyat Hareketi", xaxis_rangeslider_visible=False)
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Filtreleme kriterlerinize uyan hisse kalmadı.")
+
     with col2:
-        if tik:
-            st.subheader("Özet")
-            try:
-                inf = yf.Ticker(tik).info
-                st.metric("Fiyat", f"${inf.get('currentPrice', '-')}")
-                st.metric("Hedef", f"${inf.get('targetMeanPrice', '-')}")
-                st.info(inf.get('longBusinessSummary', '')[:150] + "...")
-            except:
-                st.write("Bilgi yok.")
-elif st.session_state.data.empty and st.sidebar.button("Tekrar Dene"): # Buton state trick
-    st.warning("Sonuç bulunamadı.")
+        if not filtered_df.empty and selected_ticker:
+            st.subheader("📝 Rasyo Kartı")
+            # Seçilen hissenin verilerini bul
+            row = filtered_df[filtered_df['Ticker'] == selected_ticker].iloc[0]
+            
+            st.metric("F/K Oranı", f"{row['F/K']:.2f}")
+            st.metric("ROE (Kârlılık)", f"%{row['ROE (%)']:.1f}")
+            
+            potansiyel = 0
+            if row['Hedef Fiyat'] > 0:
+                potansiyel = ((row['Hedef Fiyat'] - row['Fiyat ($)']) / row['Fiyat ($)']) * 100
+                color = "green" if potansiyel > 0 else "red"
+                st.markdown(f"**Analist Hedefi:** ${row['Hedef Fiyat']:.2f}")
+                st.markdown(f"**Potansiyel:** :{color}[%{potansiyel:.1f}]")
+            else:
+                st.write("Analist hedefi yok.")
+
 else:
-    st.info("Filtreleri ayarlayıp 'Taramayı Başlat' butonuna basınız.")
+    st.info("👈 Lütfen sol menüden tarama derinliğini seçip 'Canlı Taramayı Başlat' butonuna basınız.")
+    st.caption("Not: '50' seçeneği yaklaşık 30 saniye, '500' seçeneği 5-10 dakika sürebilir.")
