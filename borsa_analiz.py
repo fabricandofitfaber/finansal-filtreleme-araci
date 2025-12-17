@@ -3,118 +3,200 @@ import pandas as pd
 import yfinance as yf
 import requests
 import plotly.graph_objects as go
+import time
 
 # --- Sayfa Yapılandırması ---
-st.set_page_config(page_title="Gelişmiş Finansal Tarama", layout="wide")
-st.title("📊 Akademik Düzey Hisse Senedi Analiz Platformu")
-st.markdown("Veri Kaynağı: **Finviz** (Temel) & **Yahoo Finance** (Teknik)")
+st.set_page_config(page_title="Pro Akademik Analiz", layout="wide")
+st.title("📊 Akademik Düzey Genişletilmiş Hisse Tarama")
+st.markdown("Veri Kaynağı: **Finviz** (Çoklu Sayfa Tarama) | Teknik: **Yahoo Finance**")
 
-# --- Yan Menü (Filtreler) ---
-st.sidebar.header("🔍 Filtreleme Kriterleri")
+# --- Session State (Veri Kalıcılığı İçin) ---
+if 'data' not in st.session_state:
+    st.session_state.data = pd.DataFrame()
 
-sector_list = ["Any", "Basic Materials", "Communication Services", "Consumer Cyclical", "Consumer Defensive", "Energy", "Financial", "Healthcare", "Industrials", "Real Estate", "Technology", "Utilities"]
-sector = st.sidebar.selectbox("Sektör", sector_list, index=10) # Varsayılan: Teknoloji
+# --- Yan Menü Filtreleri ---
+st.sidebar.header("🔍 Detaylı Filtreleme")
 
-pe_ratio = st.sidebar.selectbox("F/K Oranı (P/E)", ["Any", "Low (<15)", "Under 20", "Under 25", "High (>50)"], index=0)
-roe = st.sidebar.selectbox("Özkaynak Kârlılığı (ROE)", ["Any", "Positive (>0%)", "High (>15%)", "Very High (>20%)"], index=0)
+# 1. Sektör (Tam Liste)
+sector_list = [
+    "Any", "Basic Materials", "Communication Services", "Consumer Cyclical", 
+    "Consumer Defensive", "Energy", "Financial", "Healthcare", 
+    "Industrials", "Real Estate", "Technology", "Utilities"
+]
+sector = st.sidebar.selectbox("Sektör", sector_list, index=0)
 
-# --- Akıllı Veri Çekme Motoru ---
-@st.cache_data
-def get_finviz_data(sec, pe, roe_val):
-    filters = []
+# 2. Piyasa Değeri
+mcap = st.sidebar.selectbox("Piyasa Değeri", ["Any", "Mega ($200bln+)", "Large ($10bln+)", "Mid ($2bln+)", "Small ($300mln+)"], index=0)
+
+# 3. Genişletilmiş F/K (P/E) Seçenekleri
+pe_opts = [
+    "Any", "Low (<15)", "Profitable (<0)", "High (>50)", 
+    "Under 5", "Under 10", "Under 15", "Under 20", "Under 25", "Under 30", "Under 35",
+    "Over 5", "Over 10", "Over 15", "Over 20", "Over 25", "Over 30", "Over 50"
+]
+pe_ratio = st.sidebar.selectbox("F/K Oranı (Değerleme)", pe_opts, index=0)
+
+# 4. ROE
+roe_opts = ["Any", "Positive (>0%)", "High (>15%)", "Very High (>20%)", "Over 30%", "Over 40%", "Over 50%"]
+roe = st.sidebar.selectbox("ROE (Kârlılık)", roe_opts, index=0)
+
+# 5. Yeni Eklenen Rasyolar
+debt_equity = st.sidebar.selectbox("Borç/Özkaynak (Risk)", ["Any", "Low (<0.1)", "Under 0.5", "Under 1", "High (>0.5)"], index=0)
+dividend = st.sidebar.selectbox("Temettü Verimi", ["Any", "Positive (>0%)", "High (>5%)", "Very High (>10%)"], index=0)
+margin = st.sidebar.selectbox("Net Kâr Marjı", ["Any", "Positive (>0%)", "High (>20%)", "Very High (>30%)"], index=0)
+
+# --- Veri Çekme Motoru (Sayfalama Destekli) ---
+def get_finviz_data_multi_page(sec, mc, pe, roe_val, de, div, marg):
+    all_dfs = []
+    base_filters = []
     
-    # Sektör Mapping
-    if sec != "Any":
-        sec_map = {
-            "Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices",
-            "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive",
-            "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare",
-            "Industrials": "sec_industrials", "Real Estate": "sec_realestate",
-            "Technology": "sec_technology", "Utilities": "sec_utilities"
-        }
-        filters.append(f"s={sec_map.get(sec, '')}")
-
-    # Rasyo Mapping
-    if pe == "Low (<15)": filters.append("fa_pe_u15")
-    elif pe == "Under 20": filters.append("fa_pe_u20")
-    elif pe == "Under 25": filters.append("fa_pe_u25")
-    elif pe == "High (>50)": filters.append("fa_pe_o50")
-    
-    if roe_val == "Positive (>0%)": filters.append("fa_roe_pos")
-    elif roe_val == "High (>15%)": filters.append("fa_roe_o15")
-    elif roe_val == "Very High (>20%)": filters.append("fa_roe_o20")
-
-    filter_string = ",".join(filters)
-    base_url = f"https://finviz.com/screener.ashx?v=111&f={filter_string}"
-    
-    # Header Spoofing (Tarayıcı gibi davran)
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    # Mapping
+    sec_map = {
+        "Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices",
+        "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive",
+        "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare",
+        "Industrials": "sec_industrials", "Real Estate": "sec_realestate",
+        "Technology": "sec_technology", "Utilities": "sec_utilities"
     }
-    
-    try:
-        response = requests.get(base_url, headers=headers)
-        # Tüm tabloları çekiyoruz
-        tables = pd.read_html(response.text)
-        
-        target_df = pd.DataFrame()
-        
-        # --- TABLO SEÇME ALGORİTMASI ---
-        # Sayfadaki her bir tabloyu kontrol ediyoruz
-        for t in tables:
-            # 1. Kontrol: Sütun isimlerinde 'Ticker' ve 'Price' var mı?
-            # 2. Kontrol: Tablo boş değil mi?
-            # 3. Kontrol: İlk satır "Reset Filters" gibi bir menü yazısı DEĞİL mi?
-            if 'Ticker' in t.columns and 'Price' in t.columns and len(t) > 1:
-                # Verinin gerçek olup olmadığını anlamak için Ticker sütununa bakıyoruz
-                first_ticker = str(t.iloc[0]['Ticker'])
-                if first_ticker not in ['nan', 'None', 'Ticker']:
-                    target_df = t
-                    break # Doğru tabloyu bulduk, döngüden çık
-        
-        if not target_df.empty:
-            # Veri Temizliği
-            target_df = target_df[['Ticker', 'Company', 'Sector', 'P/E', 'Price', 'Change', 'Volume']]
-            target_df = target_df.dropna(subset=['Ticker']) # Ticker'ı boş olan satırları sil
-            return target_df, base_url
-        else:
-            return pd.DataFrame(), base_url
-            
-    except Exception as e:
-        return pd.DataFrame(), str(e)
+    if sec != "Any": base_filters.append(f"s={sec_map[sec]}")
 
-# --- Ana Akış ---
-if st.sidebar.button("Sonuçları Getir"):
-    with st.spinner('Veriler analiz ediliyor...'):
-        df_results, info = get_finviz_data(sector, pe_ratio, roe)
+    # Market Cap
+    if mc == "Mega ($200bln+)": base_filters.append("cap_mega")
+    elif mc == "Large ($10bln+)": base_filters.append("cap_large")
+    elif mc == "Mid ($2bln+)": base_filters.append("cap_mid")
+    elif mc == "Small ($300mln+)": base_filters.append("cap_small")
+
+    # P/E Mapping
+    pe_map = {
+        "Low (<15)": "fa_pe_u15", "Profitable (<0)": "fa_pe_profitable", "High (>50)": "fa_pe_o50",
+        "Under 5": "fa_pe_u5", "Under 10": "fa_pe_u10", "Under 15": "fa_pe_u15", "Under 20": "fa_pe_u20",
+        "Under 25": "fa_pe_u25", "Under 30": "fa_pe_u30", "Under 35": "fa_pe_u35",
+        "Over 5": "fa_pe_o5", "Over 10": "fa_pe_o10", "Over 15": "fa_pe_o15", "Over 20": "fa_pe_o20",
+        "Over 25": "fa_pe_o25", "Over 30": "fa_pe_o30", "Over 50": "fa_pe_o50"
+    }
+    if pe in pe_map: base_filters.append(pe_map[pe])
+
+    # ROE Mapping
+    if roe_val == "Positive (>0%)": base_filters.append("fa_roe_pos")
+    elif roe_val == "High (>15%)": base_filters.append("fa_roe_o15")
+    elif roe_val == "Very High (>20%)": base_filters.append("fa_roe_o20")
+    elif roe_val == "Over 30%": base_filters.append("fa_roe_o30")
+    elif roe_val == "Over 40%": base_filters.append("fa_roe_o40")
+    elif roe_val == "Over 50%": base_filters.append("fa_roe_o50")
+
+    # Diğer Rasyolar
+    if de == "Low (<0.1)": base_filters.append("fa_debteq_u0.1")
+    elif de == "Under 0.5": base_filters.append("fa_debteq_u0.5")
+    elif de == "Under 1": base_filters.append("fa_debteq_u1")
     
-    if not df_results.empty:
-        st.success(f"Analiz Tamamlandı: **{len(df_results)}** şirket listelendi.")
-        st.dataframe(df_results, use_container_width=True)
+    if div == "Positive (>0%)": base_filters.append("fa_div_pos")
+    elif div == "High (>5%)": base_filters.append("fa_div_o5")
+    elif div == "Very High (>10%)": base_filters.append("fa_div_o10")
+    
+    if marg == "Positive (>0%)": base_filters.append("fa_netmargin_pos")
+    elif marg == "High (>20%)": base_filters.append("fa_netmargin_o20")
+    elif marg == "Very High (>30%)": base_filters.append("fa_netmargin_o30")
+
+    filter_str = ",".join(base_filters)
+    
+    # --- ÇOKLU SAYFA TARAMA (PAGINATION) ---
+    # İlk 3 sayfayı (60 hisse) çekmek için döngü
+    # r=1 (1. sayfa), r=21 (2. sayfa), r=41 (3. sayfa)
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    progress_bar = st.progress(0)
+    
+    for i, start_row in enumerate([1, 21, 41]):
+        try:
+            url = f"https://finviz.com/screener.ashx?v=111&f={filter_str}&r={start_row}"
+            response = requests.get(url, headers=headers)
+            tables = pd.read_html(response.text)
+            
+            # Doğru tabloyu bulma mantığı
+            for t in tables:
+                if 'Ticker' in t.columns and len(t) > 1:
+                    t_clean = t[['Ticker', 'Company', 'Sector', 'P/E', 'Price', 'Change', 'Volume']]
+                    all_dfs.append(t_clean)
+                    break
+            
+            progress_bar.progress((i + 1) * 33)
+            time.sleep(0.5) # Anti-bot beklemesi
+            
+        except Exception:
+            break # Hata olursa veya sayfa biterse döngüyü kır
+            
+    progress_bar.empty()
+    
+    if all_dfs:
+        final_df = pd.concat(all_dfs).drop_duplicates(subset=['Ticker']).reset_index(drop=True)
+        return final_df
+    return pd.DataFrame()
+
+# --- Uygulama Mantığı ---
+
+# Butona basılınca veriyi çek ve session_state'e kaydet
+if st.sidebar.button("Sonuçları Getir"):
+    with st.spinner('Çoklu sayfa taraması yapılıyor...'):
+        df = get_finviz_data_multi_page(sector, mcap, pe_ratio, roe, debt_equity, dividend, margin)
+        st.session_state.data = df
+
+# Eğer data boş değilse (daha önce çekildiyse veya yeni çekildiyse)
+if not st.session_state.data.empty:
+    df_display = st.session_state.data
+    
+    st.success(f"Analiz Sonucu: Toplam **{len(df_display)}** şirket bulundu.")
+    st.dataframe(df_display, use_container_width=True)
+    
+    st.divider()
+    
+    # --- Grafik Bölümü ---
+    # Session State sayesinde buradaki seçim sayfayı yenilese bile 
+    # yukarıdaki dataframe kaybolmaz.
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.subheader("📈 Teknik Analiz")
+        # Selectbox listesini güvenli string'e çevir
+        ticker_options = df_display['Ticker'].astype(str).tolist()
+        selected_ticker = st.selectbox("Grafik Görüntüle:", ticker_options)
         
-        st.divider()
-        st.subheader("📈 Teknik Grafik")
-        
-        # Seçim Kutusu (Ticker listesi kesinlikle string ve dolu)
-        ticker_list = df_results['Ticker'].astype(str).tolist()
-        selected_ticker = st.selectbox("Detaylı inceleme için şirket seçiniz:", ticker_list)
-        
-        if selected_ticker and selected_ticker != 'nan':
+        if selected_ticker:
             try:
+                # Veri indir
                 stock_data = yf.download(selected_ticker, period="1y", progress=False)
+                
                 if not stock_data.empty:
+                    # Grafik çiz
                     fig = go.Figure(data=[go.Candlestick(x=stock_data.index,
                                     open=stock_data['Open'], high=stock_data['High'],
-                                    low=stock_data['Low'], close=stock_data['Close'])])
-                    fig.update_layout(title=f"{selected_ticker} Fiyat Hareketi", height=500)
+                                    low=stock_data['Low'], close=stock_data['Close'],
+                                    name=selected_ticker)])
+                    fig.update_layout(title=f"{selected_ticker} Günlük Grafik", height=500, xaxis_rangeslider_visible=False)
                     st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.warning("Yahoo Finance verisi alınamadı.")
+                    st.warning("Grafik verisi yüklenemedi.")
             except Exception as e:
-                st.error(f"Grafik oluşturulamadı: {e}")
-    else:
-        st.error("Veri çekilemedi veya kriterlere uygun sonuç yok.")
-        if info: st.caption(f"Debug Bilgisi: {info[:200]}...") # Hata mesajını kısaca göster
-else:
-    st.info("Sol menüden kriterleri belirleyip butona basınız.")
+                st.error(f"Hata: {e}")
+
+    with col2:
+        if selected_ticker:
+            st.subheader("ℹ️ Özet")
+            try:
+                info = yf.Ticker(selected_ticker).info
+                st.write(f"**Endüstri:** {info.get('industry', '-')}")
+                st.write(f"**Çalışan:** {info.get('fullTimeEmployees', '-')}")
+                
+                beta = info.get('beta', None)
+                if beta: st.metric("Beta (Risk)", f"{beta:.2f}")
+                
+                target = info.get('targetMeanPrice', None)
+                current = info.get('currentPrice', None)
+                if target and current:
+                    upside = ((target - current) / current) * 100
+                    st.metric("Analist Hedefi", f"${target}", f"%{upside:.1f}")
+            except:
+                st.write("Detay bilgi yok.")
+
+elif st.session_state.data.empty:
+    st.info("Lütfen filtreleri ayarlayıp 'Sonuçları Getir' butonuna basınız.")
