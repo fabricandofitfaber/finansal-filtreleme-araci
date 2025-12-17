@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 
 # --- Sayfa Ayarları ---
 st.set_page_config(page_title="Global Piyasa Tarama", layout="wide")
-st.title("📊 Global Hisse Senedi Tarama")
+st.title("📊 Global Hisse Senedi Tarama Modülü")
 st.markdown("**Veri Kaynağı:** Finviz (Tüm ABD Piyasası) | **Kapsam:** Sınırsız")
 
 # --- Session State (Veri Kalıcılığı) ---
@@ -67,29 +67,30 @@ def run_finviz_screener(exc, sec, mc, pe, roe_val, div):
     filter_str = ",".join(filters)
     url = f"https://finviz.com/screener.ashx?v=111&f={filter_str}"
     
-    # Tarayıcı Taklidi (Bot Koruması İçin)
+    # Tarayıcı Taklidi (Bot Koruması İçin Şart)
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     
     try:
         response = requests.get(url, headers=headers, timeout=15)
         
-        # Sayfadaki TÜM tabloları çekiyoruz (header=0 diyerek ilk satırı başlık yapıyoruz)
+        # --- KRİTİK NOKTA: Tablo Seçimi ---
+        # Sayfadaki BÜTÜN tabloları indiriyoruz (header=0 ile ilk satırı başlık yapıyoruz)
         all_tables = pd.read_html(response.text, header=0)
         
         target_df = pd.DataFrame()
         
-        # --- TABLO SEÇME MANTIĞI ---
+        # Döngü ile doğru tabloyu arıyoruz
         for t in all_tables:
-            # Menü tablosunu değil, gerçek veri tablosunu arıyoruz.
-            # Gerçek tabloda 'No.', 'Ticker' ve 'Price' sütunları MUTLAKA vardır.
-            # O uzun filtre yazısında 'No.' sütunu yoktur.
+            # Gerçek veri tablosunun parmak izi: 'No.', 'Ticker' ve 'Price' sütunları
+            # Menü tablosunda 'No.' sütunu (Sıra numarası) asla olmaz.
             if 'No.' in t.columns and 'Ticker' in t.columns and 'Price' in t.columns:
                 target_df = t
-                break
+                break # Doğru tabloyu bulduk, aramayı bitir.
         
         return target_df, url
 
     except Exception as e:
+        st.error(f"Hata detayı: {e}")
         return pd.DataFrame(), url
 
 # --- Ana Akış ---
@@ -102,25 +103,25 @@ if st.sidebar.button("Sonuçları Getir"):
             st.session_state.scan_results = df_result
             st.session_state.data_url = link
         else:
-            st.error("Veri bulunamadı veya Finviz bağlantısı engellendi.")
+            st.warning("Veri bulunamadı. Lütfen filtreleri gevşetin (Örn: Sektör yerine 'Any' seçin).")
 
-# Veri Gösterimi
+# Veri Varsa Ekrana Bas
 if not st.session_state.scan_results.empty:
     df = st.session_state.scan_results
     
-    # 1. Veri Tablosu
-    st.success(f"✅ {len(df)} Şirket Listelendi")
-    st.dataframe(df, use_container_width=True)
+    # 1. TABLO KISMI
+    st.success(f"✅ {len(df)} Şirket Bulundu")
     st.caption(f"Veri Kaynağı: {st.session_state.get('data_url', '')}")
+    st.dataframe(df, use_container_width=True)
 
     st.divider()
     
-    # 2. Grafik ve Analiz Alanı
+    # 2. GRAFİK KISMI
     col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.subheader("📉 Teknik Grafik")
-        # Hisse Listesi (Ticker)
+        st.subheader("📉 Fiyat Grafiği")
+        # Hisse listesini al
         ticker_list = df['Ticker'].astype(str).tolist()
         selected_ticker = st.selectbox("Grafik Görüntüle:", ticker_list)
         
@@ -143,8 +144,8 @@ if not st.session_state.scan_results.empty:
     
     with col2:
         if selected_ticker:
-            st.subheader("ℹ️ Şirket Kartı")
-            # Tablodan veriyi al
+            st.subheader("ℹ️ Özet")
+            # Seçilen satırı bul
             row = df[df['Ticker'] == selected_ticker].iloc[0]
             try:
                 st.metric("Fiyat", str(row['Price']))
@@ -153,7 +154,7 @@ if not st.session_state.scan_results.empty:
                 st.write(f"**Sektör:** {row['Sector']}")
                 st.write(f"**Ülke:** {row['Country']}")
             except:
-                st.write("Veri formatı uyumsuz.")
+                st.write("Veri okunamadı.")
 
 elif st.session_state.scan_results.empty:
-    st.info("👈 Kriterleri seçip 'Sonuçları Getir' butonuna basınız.")
+    st.info("👈 Sol menüden kriterleri seçip 'Sonuçları Getir' butonuna basınız.")
