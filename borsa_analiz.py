@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 
 # --- Sayfa Ayarları ---
 st.set_page_config(page_title="Global Piyasa Tarama", layout="wide")
-st.title("📊 Global Hisse Senedi Tarama (Akıllı Ayıklayıcı)")
+st.title("📊 Global Hisse Senedi Tarama")
 st.markdown("**Veri Kaynağı:** Finviz (Tüm ABD Piyasası) | **Kapsam:** Sınırsız")
 
 # --- Session State (Veri Kalıcılığı) ---
@@ -35,9 +35,9 @@ roe = st.sidebar.selectbox("ROE (Kârlılık)", ["Any", "Positive (>0%)", "High 
 # 6. Temettü
 dividend = st.sidebar.selectbox("Temettü Verimi", ["Any", "Positive (>0%)", "High (>5%)", "Very High (>10%)"], index=0)
 
-# --- Veri Çekme Fonksiyonu (Düzeltilmiş) ---
+# --- Veri Çekme Fonksiyonu (Akıllı Ayıklayıcı) ---
 def run_finviz_screener(exc, sec, mc, pe, roe_val, div):
-    # URL Parametreleri
+    # URL Parametrelerini Oluştur
     filters = []
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
     
@@ -67,29 +67,27 @@ def run_finviz_screener(exc, sec, mc, pe, roe_val, div):
     filter_str = ",".join(filters)
     url = f"https://finviz.com/screener.ashx?v=111&f={filter_str}"
     
+    # Tarayıcı Taklidi (Bot Koruması İçin)
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     
     try:
         response = requests.get(url, headers=headers, timeout=15)
         
-        # --- KRİTİK DÜZELTME ---
-        # Sayfadaki TÜM tabloları çekiyoruz
-        all_tables = pd.read_html(response.text)
+        # Sayfadaki TÜM tabloları çekiyoruz (header=0 diyerek ilk satırı başlık yapıyoruz)
+        all_tables = pd.read_html(response.text, header=0)
         
         target_df = pd.DataFrame()
         
-        # Tablolar arasında geziniyoruz ve doğru olanı arıyoruz
+        # --- TABLO SEÇME MANTIĞI ---
         for t in all_tables:
-            # Finviz'in gerçek veri tablosunda mutlaka 'No.', 'Ticker' ve 'Company' sütunları olur.
-            # Menü tablosunda bunlar olmaz.
-            if 'No.' in t.columns and 'Ticker' in t.columns and 'Company' in t.columns:
+            # Menü tablosunu değil, gerçek veri tablosunu arıyoruz.
+            # Gerçek tabloda 'No.', 'Ticker' ve 'Price' sütunları MUTLAKA vardır.
+            # O uzun filtre yazısında 'No.' sütunu yoktur.
+            if 'No.' in t.columns and 'Ticker' in t.columns and 'Price' in t.columns:
                 target_df = t
                 break
         
-        if not target_df.empty:
-            return target_df, url
-        else:
-            return pd.DataFrame(), url
+        return target_df, url
 
     except Exception as e:
         return pd.DataFrame(), url
@@ -97,66 +95,65 @@ def run_finviz_screener(exc, sec, mc, pe, roe_val, div):
 # --- Ana Akış ---
 
 if st.sidebar.button("Sonuçları Getir"):
-    with st.spinner("Finviz taranıyor ve menüler temizleniyor..."):
+    with st.spinner("Piyasa taranıyor..."):
         df_result, link = run_finviz_screener(exchange, sector, mcap, pe_ratio, roe, dividend)
-        st.session_state.scan_results = df_result
-        st.session_state.data_url = link
+        
+        if not df_result.empty:
+            st.session_state.scan_results = df_result
+            st.session_state.data_url = link
+        else:
+            st.error("Veri bulunamadı veya Finviz bağlantısı engellendi.")
 
 # Veri Gösterimi
 if not st.session_state.scan_results.empty:
     df = st.session_state.scan_results
     
-    st.success(f"✅ {len(df)} Şirket Bulundu")
-    st.caption(f"Kaynak URL: {st.session_state.get('data_url', '')}")
+    # 1. Veri Tablosu
+    st.success(f"✅ {len(df)} Şirket Listelendi")
+    st.dataframe(df, use_container_width=True)
+    st.caption(f"Veri Kaynağı: {st.session_state.get('data_url', '')}")
+
+    st.divider()
     
-    # Tabloyu Temizle ve Göster
-    # Finviz bazen ilk satırı tekrar başlık olarak alabilir, temizliyoruz
-    if 'Ticker' in df.columns:
-        st.dataframe(df, use_container_width=True)
+    # 2. Grafik ve Analiz Alanı
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.subheader("📉 Teknik Grafik")
+        # Hisse Listesi (Ticker)
+        ticker_list = df['Ticker'].astype(str).tolist()
+        selected_ticker = st.selectbox("Grafik Görüntüle:", ticker_list)
         
-        st.divider()
-        
-        # --- TEKNİK ANALİZ (Grafik) ---
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            st.subheader("📉 Fiyat Grafiği")
-            # Ticker listesini al
-            ticker_list = df['Ticker'].astype(str).tolist()
-            
-            selected_ticker = st.selectbox("Grafik için Hisse Seç:", ticker_list)
-            
-            if selected_ticker:
-                try:
-                    # Grafik verisi Yahoo'dan gelir
-                    stock_data = yf.download(selected_ticker, period="1y", progress=False)
-                    
-                    if not stock_data.empty:
-                        fig = go.Figure(data=[go.Candlestick(x=stock_data.index,
-                                        open=stock_data['Open'], high=stock_data['High'],
-                                        low=stock_data['Low'], close=stock_data['Close'],
-                                        name=selected_ticker)])
-                        fig.update_layout(height=500, title=f"{selected_ticker} - Günlük", xaxis_rangeslider_visible=False)
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.warning("Grafik verisi yüklenemedi.")
-                except:
-                    st.error("Grafik oluşturulurken hata oluştu.")
-        
-        with col2:
-            if selected_ticker:
-                st.subheader("ℹ️ Özet")
-                # Seçilen satırı bul
-                row = df[df['Ticker'] == selected_ticker].iloc[0]
-                try:
-                    st.metric("Fiyat", str(row['Price']))
-                    st.metric("F/K", str(row['P/E']))
-                    st.metric("Sektör", str(row['Sector']))
-                    st.metric("Hacim", str(row['Volume']))
-                except:
-                    st.write("Veri okunamadı.")
-    else:
-        st.error("Veri formatı bozuk. Lütfen tekrar deneyin.")
+        if selected_ticker:
+            try:
+                # Yahoo Finance'den grafik verisi
+                stock_data = yf.download(selected_ticker, period="1y", progress=False)
+                
+                if not stock_data.empty:
+                    fig = go.Figure(data=[go.Candlestick(x=stock_data.index,
+                                    open=stock_data['Open'], high=stock_data['High'],
+                                    low=stock_data['Low'], close=stock_data['Close'],
+                                    name=selected_ticker)])
+                    fig.update_layout(height=500, title=f"{selected_ticker} - Günlük", xaxis_rangeslider_visible=False)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("Grafik verisi yüklenemedi.")
+            except:
+                st.error("Grafik oluşturulurken hata oluştu.")
+    
+    with col2:
+        if selected_ticker:
+            st.subheader("ℹ️ Şirket Kartı")
+            # Tablodan veriyi al
+            row = df[df['Ticker'] == selected_ticker].iloc[0]
+            try:
+                st.metric("Fiyat", str(row['Price']))
+                st.metric("F/K", str(row['P/E']))
+                st.metric("Değişim", str(row['Change']))
+                st.write(f"**Sektör:** {row['Sector']}")
+                st.write(f"**Ülke:** {row['Country']}")
+            except:
+                st.write("Veri formatı uyumsuz.")
 
 elif st.session_state.scan_results.empty:
-    st.info("Sol menüden kriterleri seçip 'Sonuçları Getir' butonuna basınız.")
+    st.info("👈 Kriterleri seçip 'Sonuçları Getir' butonuna basınız.")
