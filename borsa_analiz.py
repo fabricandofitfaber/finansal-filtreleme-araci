@@ -8,97 +8,94 @@ import time
 import numpy as np
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v25", layout="wide")
-st.title("📊 Akademik Karar Destek Sistemi (Native Mod)")
+st.set_page_config(page_title="Akademik Analiz v26", layout="wide")
+st.title("📊 Akademik Karar Destek Sistemi (Bütünçül Sentez)")
 st.markdown("""
-**Durum:** yfinance kütüphanesinin yerleşik koruması kullanılıyor (Session hatası giderildi).
-**Özellik:** Bilanço üzerinden Manuel EV/EBITDA Hesaplama + Detaylı Yorum.
+**Altyapı:** v16 Filtre Derinliği + v25 Hesaplama Motoru
+**Yenilik:** Verileri tek tek okumak yerine birleştirip 'Nihai Kanaat' üreten yorumlayıcı.
 """)
 
 # --- Session State ---
 if 'scan_data' not in st.session_state:
     st.session_state.scan_data = pd.DataFrame()
 
-# --- YAN MENÜ ---
-st.sidebar.header("🔍 Filtreleme Paneli")
-limit_opts = {20: 1, 40: 2, 60: 3, 100: 5}
-scan_limit = st.sidebar.selectbox("Evren Genişliği", list(limit_opts.keys()), index=1)
+# --- YAN MENÜ (Tam Kadro Filtreler) ---
+st.sidebar.header("🔍 Çok Katmanlı Filtreleme")
 
+# 0. Evren Genişliği
+limit_opts = {20: 1, 40: 2, 60: 3, 100: 5, 200: 10}
+scan_limit = st.sidebar.selectbox("Evren Genişliği (Sayfa)", list(limit_opts.keys()), index=2)
+
+# 1. Borsa & Sektör
 exchange = st.sidebar.selectbox("Borsa", ["Any", "AMEX", "NASDAQ", "NYSE"], index=0)
 sector = st.sidebar.selectbox("Sektör", ["Any", "Basic Materials", "Communication Services", "Consumer Cyclical", "Consumer Defensive", "Energy", "Financial", "Healthcare", "Industrials", "Real Estate", "Technology", "Utilities"], index=0)
 
-st.sidebar.markdown("### Temel & Teknik")
-pe_ratio = st.sidebar.selectbox("F/K", ["Any", "Low (<15)", "Under 20", "Over 20"], index=0)
-roe = st.sidebar.selectbox("ROE", ["Any", "Positive (>0%)", "High (>15%)"], index=0)
-rsi_filter = st.sidebar.selectbox("RSI", ["Any", "Oversold (<30)", "Overbought (>70)", "Neutral (40-60)"], index=0)
+# 2. Temel Filtreler (Değer & Kalite)
+st.sidebar.markdown("### 1. Temel Filtreler (Değer & Kalite)")
+pe_opts = ["Any", "Low (<15)", "Profitable (<0)", "High (>50)", "Under 20", "Under 30", "Under 50", "Over 20"]
+pe_ratio = st.sidebar.selectbox("F/K (Değerleme)", pe_opts, index=0)
 
-# --- ZIRHLI VERİ ÇEKİCİ (Manuel Hesaplama) ---
+peg_opts = ["Any", "Low (<1)", "Under 2", "High (>3)", "Growth (>1.5)"]
+peg_ratio = st.sidebar.selectbox("PEG (Büyüme)", peg_opts, index=0)
+
+roe_opts = ["Any", "Positive (>0%)", "High (>15%)", "Very High (>20%)", "Under 0%"]
+roe = st.sidebar.selectbox("ROE (Kalite)", roe_opts, index=0)
+
+debt_opts = ["Any", "Low (<0.1)", "Under 0.5", "Under 1", "High (>1)"]
+debt_eq = st.sidebar.selectbox("Borç/Özkaynak (Risk)", debt_opts, index=0)
+
+# 3. Teknik Filtreler (Zamanlama)
+st.sidebar.markdown("### 2. Teknik Filtreler (Zamanlama)")
+rsi_filter = st.sidebar.selectbox("RSI (Momentum)", ["Any", "Oversold (<30)", "Overbought (>70)", "Neutral (40-60)"], index=0)
+price_ma = st.sidebar.selectbox("Fiyat vs MA200", ["Any", "Above SMA200", "Below SMA200"], index=0)
+
+
+# --- HESAPLAMA MOTORU (Calculation Engine) ---
 def fetch_robust_metrics(ticker):
-    """
-    EV/EBITDA için önce hazır veriye bakar, yoksa bilançodan hesaplar.
-    """
-    metrics = {'EV/EBITDA': None, 'FCF': None, 'Debt/Eq': None, 'Source': '-'}
+    """EV/EBITDA ve FCF için Bilanço Hesaplaması"""
+    metrics = {'EV/EBITDA': None, 'FCF': None, 'Source': '-'}
     
     try:
-        # Session kullanmıyoruz! yfinance kendi halletsin.
         stock = yf.Ticker(ticker)
         
-        # 1. Hazır Veriyi Dene (.info)
-        # Bazen burası boş gelir, sorun değil, aşağıda hesaplayacağız.
+        # 1. Hazır Veri Denemesi
         try:
             info = stock.info
             metrics['EV/EBITDA'] = info.get('enterpriseToEbitda')
             metrics['FCF'] = info.get('freeCashflow')
-            if info.get('debtToEquity'):
-                metrics['Debt/Eq'] = info.get('debtToEquity') / 100
             metrics['Source'] = 'Yahoo Info'
-        except:
-            pass # Info patlarsa devam et
+        except: pass
 
-        # 2. MANUEL HESAPLAMA (Garantili Yöntem)
-        # Eğer hazır veri yoksa (Apple örneğindeki gibi), kolları sıvıyoruz.
+        # 2. Manuel Hesaplama (Yedek Plan)
         if metrics['EV/EBITDA'] is None:
             try:
-                # Market Cap (Hızlı Info'dan)
                 mcap = stock.fast_info['market_cap']
-                
-                # Finansal Tablolar
                 bs = stock.balance_sheet
                 inc = stock.income_stmt
                 
                 if not bs.empty and not inc.empty:
-                    curr_bs = bs.iloc[:, 0] # En güncel dönem
+                    curr_bs = bs.iloc[:, 0]
                     curr_inc = inc.iloc[:, 0]
                     
-                    # Borç Bul
                     debt = 0
                     for k in ['Total Debt', 'TotalDebt', 'Long Term Debt']:
                         if k in curr_bs.index: debt = curr_bs[k]; break
                     
-                    # Nakit Bul
                     cash = 0
-                    for k in ['Cash', 'CashAndCashEquivalents', 'Cash And Cash Equivalents']:
+                    for k in ['Cash', 'CashAndCashEquivalents']:
                         if k in curr_bs.index: cash = curr_bs[k]; break
                     
-                    # EBITDA Bul
                     ebitda = 0
-                    for k in ['EBITDA', 'Normalized EBITDA', 'Ebitda']:
+                    for k in ['EBITDA', 'Normalized EBITDA']:
                         if k in curr_inc.index: ebitda = curr_inc[k]; break
                     
-                    # EV = Market Cap + Debt - Cash
-                    # EV/EBITDA = EV / EBITDA
                     if mcap and ebitda and ebitda > 0:
                         ev = mcap + debt - cash
                         metrics['EV/EBITDA'] = ev / ebitda
                         metrics['Source'] = 'Bilanço Hesabı'
-                        
-            except Exception as e:
-                # Hesaplama hatası olursa sessizce geç
-                pass
-                
-    except Exception:
-        pass
-        
+            except: pass
+            
+    except: pass
     return metrics
 
 # --- İNDİKATÖRLER ---
@@ -120,70 +117,97 @@ def calculate_ta(df):
     df['Drawdown'] = (df['Close'] - rolling_max) / rolling_max * 100
     return df
 
-# --- AKILLI YORUM MOTORU ---
-def generate_narrative_report(ticker, finviz_row, metrics, hist):
-    comments = []
+# --- BÜTÜNÇÜL YORUM MOTORU (Holistic Engine) ---
+def generate_holistic_report(ticker, finviz_row, metrics, hist):
     last = hist.iloc[-1]
-    
     curr = last['Close']
-    ma50 = last['MA50']
     ma200 = last['MA200']
     rsi = last['RSI']
-    vol = last['Volatility']
-    
     evebitda = metrics.get('EV/EBITDA')
     
-    # 1. Trend Analizi
-    st.markdown("#### 1. Trend ve Momentum")
-    if curr > ma200:
-        trend = "YÜKSELİŞ (BOĞA)"
-        st.success(f"📈 **Uzun Vade:** {trend}. Fiyat 200 günlük ortalamanın üzerinde, ana yön yukarı.")
-    else:
-        trend = "DÜŞÜŞ (AYI)"
-        st.error(f"📉 **Uzun Vade:** {trend}. Fiyat 200 günlük ortalamanın altında, baskı sürüyor.")
-        
-    if curr > ma50:
-        st.info(f"✅ **Kısa Vade:** Fiyat (${curr:.2f}), 50 günlük ortalamanın (${ma50:.2f}) üzerinde. Alıcılar istekli.")
-    else:
-        st.warning(f"⚠️ **Kısa Vade:** Fiyat (${curr:.2f}), 50 günlük ortalamanın (${ma50:.2f}) altına sarktı. Dinlenme/Düzeltme sürecinde.")
+    # 1. NİHAİ AKADEMİK KANAAT (Sentez)
+    st.markdown("#### 🏛️ Yönetici Özeti (Nihai Kanaat)")
+    
+    sentiment = "NÖTR"
+    color = "blue"
+    reason = "Veriler karmaşık sinyaller üretiyor."
+    
+    # Sentez Mantığı
+    is_uptrend = curr > ma200
+    is_cheap = (evebitda and evebitda < 12)
+    is_oversold = rsi < 35
+    is_overbought = rsi > 70
+    
+    if is_uptrend and is_cheap:
+        sentiment = "GÜÇLÜ ALIM ADAYI (Growth at Reasonable Price)"
+        color = "green"
+        reason = "Hisse hem teknik olarak yükseliş trendinde hem de temel olarak (EV/EBITDA) ucuz fiyatlanıyor. İdeal 'Smart Beta' senaryosu."
+    elif is_uptrend and is_overbought:
+        sentiment = "KÂR REALİZASYONU (Düzeltme Riski)"
+        color = "orange"
+        reason = "Trend güçlü ancak momentum (RSI) aşırı ısınmış. Fiyat soluklanmak isteyebilir."
+    elif not is_uptrend and is_cheap:
+        sentiment = "DEĞER TUZAĞI RİSKİ (İzleme Listesi)"
+        color = "red"
+        reason = "Şirket temel olarak ucuz olsa da teknik trend negatif (Ayı Piyasası). Piyasa henüz ucuzluğu fiyatlamıyor, düşen bıçak tutulmamalı."
+    elif not is_uptrend and not is_cheap:
+        sentiment = "ZAYIF GÖRÜNÜM (Uzak Dur)"
+        color = "red"
+        reason = "Hisse hem pahalı hem de düşüş trendinde."
 
-    # 2. Değerleme (EV/EBITDA)
-    st.markdown("#### 2. Akademik Değerleme")
-    if evebitda and evebitda > 0:
-        val_msg = f"Şirketin **EV/EBITDA** oranı: **{evebitda:.2f}** ({metrics['Source']})."
+    st.markdown(f":{color}-background[**{sentiment}**]")
+    st.caption(f"**Gerekçe:** {reason}")
+    
+    st.markdown("---")
+    
+    # 2. DETAYLI KANITLAR
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.write("**Teknik Kanıtlar:**")
+        trend_txt = "Pozitif (Boğa)" if is_uptrend else "Negatif (Ayı)"
+        st.write(f"• **Trend:** {trend_txt} (Fiyat MA200'ün {'üzerinde' if is_uptrend else 'altında'})")
+        st.write(f"• **Momentum:** RSI {rsi:.0f} seviyesinde.")
         
-        if evebitda < 8:
-            val_msg += " Bu seviye, şirketin nakit yaratma gücüne göre **Kelepir** olduğunu gösterir."
-            st.success(f"💰 {val_msg}")
-        elif evebitda > 20:
-            val_msg += " Piyasa şirketten yüksek büyüme bekliyor (Primli Fiyatlama)."
-            st.warning(f"⚠️ {val_msg}")
+    with c2:
+        st.write("**Temel Kanıtlar:**")
+        if evebitda:
+            val_txt = "Kelepir" if evebitda < 10 else ("Pahalı" if evebitda > 20 else "Makul")
+            st.write(f"• **Değerleme:** {evebitda:.2f} EV/EBITDA ({val_txt})")
         else:
-            val_msg += " Makul değerleme aralığında."
-            st.info(f"⚖️ {val_msg}")
-    else:
-        st.write("ℹ️ **EV/EBITDA:** Hesaplanamadı (Şirket zarar ediyor olabilir).")
-
-    # 3. Risk
-    st.markdown("#### 3. Risk Profili")
-    st.write(f"🛡️ **Volatilite:** %{vol:.1f} (Yıllık). RSI: {rsi:.0f}.")
+            st.write("• **Değerleme:** Veri yok (Riskli)")
+            
+        pe_val = finviz_row.get('P/E', '-')
+        st.write(f"• **F/K Oranı:** {pe_val}")
 
 # --- FİNVİZ TARAYICI ---
-def get_finviz_v25(limit_count, exc, sec, pe, roe_val, rsi_val):
+def get_finviz_v26(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
     filters = []
+    # Borsa & Sektör
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
     sec_map = {"Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices", "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive", "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare", "Industrials": "sec_industrials", "Real Estate": "sec_realestate", "Technology": "sec_technology", "Utilities": "sec_utilities"}
     if sec != "Any": filters.append(f"{sec_map[sec]}")
 
-    pe_map = {"Low (<15)": "fa_pe_u15", "Under 20": "fa_pe_u20", "Over 20": "fa_pe_o20"}
+    # Temel Filtreler
+    pe_map = {"Low (<15)": "fa_pe_u15", "Profitable (<0)": "fa_pe_profitable", "High (>50)": "fa_pe_o50", "Under 20": "fa_pe_u20", "Under 30": "fa_pe_u30", "Under 50": "fa_pe_u50", "Over 20": "fa_pe_o20"}
     if pe in pe_map: filters.append(pe_map[pe])
 
-    roe_map = {"Positive (>0%)": "fa_roe_pos", "High (>15%)": "fa_roe_o15"}
+    peg_map = {"Low (<1)": "fa_peg_u1", "Under 2": "fa_peg_u2", "High (>3)": "fa_peg_o3", "Growth (>1.5)": "fa_peg_o1.5"}
+    if peg in peg_map: filters.append(peg_map[peg])
+
+    roe_map = {"Positive (>0%)": "fa_roe_pos", "High (>15%)": "fa_roe_o15", "Very High (>20%)": "fa_roe_o20", "Under 0%": "fa_roe_neg"}
     if roe_val in roe_map: filters.append(roe_map[roe_val])
     
+    de_map = {"Low (<0.1)": "fa_debteq_u0.1", "Under 0.5": "fa_debteq_u0.5", "Under 1": "fa_debteq_u1", "High (>1)": "fa_debteq_o1"}
+    if de in de_map: filters.append(de_map[de])
+
+    # Teknik Filtreler
     if rsi_val == "Oversold (<30)": filters.append("ta_rsi_os30")
     elif rsi_val == "Overbought (>70)": filters.append("ta_rsi_ob70")
     elif rsi_val == "Neutral (40-60)": filters.append("ta_rsi_n4060")
+    
+    if ma_val == "Above SMA200": filters.append("ta_sma200_pa")
+    elif ma_val == "Below SMA200": filters.append("ta_sma200_pb")
 
     filter_str = ",".join(filters)
     base_url = f"https://finviz.com/screener.ashx?v=111&f={filter_str}"
@@ -222,7 +246,7 @@ def get_finviz_v25(limit_count, exc, sec, pe, roe_val, rsi_val):
 # --- UI AKIŞI ---
 if st.sidebar.button("Analizi Başlat"):
     with st.spinner("Piyasa taranıyor..."):
-        df, url = get_finviz_v25(scan_limit, exchange, sector, pe_ratio, roe, rsi_filter)
+        df, url = get_finviz_v26(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
         st.session_state.scan_data = df
         st.session_state.url = url
 
@@ -242,9 +266,9 @@ if not st.session_state.scan_data.empty:
         adv = {}
         
         if tik:
-            with st.spinner(f"{tik} için Bilanço analizi yapılıyor..."):
+            with st.spinner("Bilanço verileri çekiliyor ve hesaplanıyor..."):
                 try:
-                    # 1. Veri ve Hesaplama (Native)
+                    # 1. Veri ve Hesaplama
                     adv = fetch_robust_metrics(tik)
                     
                     # 2. Tarihçe
@@ -264,23 +288,22 @@ if not st.session_state.scan_data.empty:
                     else:
                         st.warning("Grafik verisi bulunamadı.")
                 except Exception as e:
-                    st.error(f"Veri çekme hatası: {e}")
+                    st.error(f"Hata: {e}")
 
     with col2:
         if tik and not hist.empty:
             st.subheader("🧠 Akademik Karar Raporu")
             
-            # Finviz satırı
             fin_row = df[df['Ticker'] == tik].iloc[0]
-            st.caption(f"**Sektör:** {fin_row['Sector']} | **Fiyat:** ${fin_row['Price']} | **F/K:** {fin_row['P/E']}")
             
-            # Yorumları Üret
-            generate_narrative_report(tik, fin_row, adv, hist)
+            # YENİ: Bütünçül Yorum Motoru
+            generate_holistic_report(tik, fin_row, adv, hist)
             
             st.markdown("---")
             c1, c2 = st.columns(2)
-            c1.metric("FCF", f"${(adv.get('FCF') or 0)/1e9:.2f}B" if adv.get('FCF') else "-")
+            fcf_val = adv.get('FCF')
+            c1.metric("Serbest Nakit (FCF)", f"${fcf_val/1e9:.2f}B" if fcf_val else "-")
             c2.metric("Max Drawdown", f"%{hist.iloc[-1]['Drawdown']:.1f}")
 
 elif st.session_state.scan_data.empty:
-    st.info("👈 Analize başlamak için sol menüdeki **'Analizi Başlat'** butonuna basınız.")
+    st.info("👈 Filtreleri ayarlayıp 'Analizi Başlat' butonuna basın.")
