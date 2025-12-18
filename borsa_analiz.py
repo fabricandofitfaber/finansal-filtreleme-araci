@@ -9,11 +9,11 @@ import numpy as np
 import re
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v40", layout="wide")
+st.set_page_config(page_title="Akademik Analiz v41", layout="wide")
 st.title("📊 Akademik Karar Destek Sistemi (EV/EBITDA Fix)")
 st.markdown("""
-**Düzeltme:** EV/EBITDA verisi için 3 katmanlı (Hazır Veri -> Parçalı Veri -> Manuel Hesap) algoritma kuruldu.
-**Durum:** Tüm modüller (Haberler, Dedektif, Sözel Analiz) aktiftir.
+**Düzeltme:** EV/EBITDA hesaplama motoru 'Brute Force' moduna geçirildi. (Apple vb. için kesin çözüm).
+**Durum:** Diğer tüm fonksiyonlar (Haberler, Dedektif, Sözel Analiz) korunmuştur.
 """)
 
 # --- Session State ---
@@ -171,13 +171,13 @@ def get_finviz_news_profile(ticker):
     except: pass
     return data
 
-# --- METRİKLER VE TEKNİK (DÜZELTİLEN YER) ---
+# --- METRİKLER VE TEKNİK (EV/EBITDA FIX) ---
 def fetch_robust_metrics(ticker):
     metrics = {'EV/EBITDA': None, 'FCF': None, 'Source': '-'}
     try:
         stock = yf.Ticker(ticker)
         
-        # --- ADIM 1: FCF (Nakit Akışı) ---
+        # 1. FCF HESAPLAMA
         try:
             cf = stock.cashflow
             if not cf.empty:
@@ -188,24 +188,15 @@ def fetch_robust_metrics(ticker):
         except: pass
         if metrics['FCF'] is None: metrics['FCF'] = stock.info.get('freeCashflow')
 
-        # --- ADIM 2: EV/EBITDA (KESİN ÇÖZÜM) ---
-        
-        # YÖNTEM A: Önce Hazır Veriyi Kontrol Et (En Güveniliri)
-        ev_ebitda_info = stock.info.get('enterpriseToEbitda')
-        if ev_ebitda_info and ev_ebitda_info > 0:
-            metrics['EV/EBITDA'] = ev_ebitda_info
+        # 2. EV/EBITDA (ZIRHLI HESAPLAMA)
+        # Yöntem A: Hazır Veri (En Kolayı)
+        ev_ebitda = stock.info.get('enterpriseToEbitda')
+        if ev_ebitda and ev_ebitda > 0:
+            metrics['EV/EBITDA'] = ev_ebitda
             metrics['Source'] = 'Yahoo Info'
-            return metrics # Bulduysan dön, daha fazla uğraşma
-
-        # YÖNTEM B: Hazır Bileşenlerden Hesapla
-        ev_info = stock.info.get('enterpriseValue')
-        ebitda_info = stock.info.get('ebitda')
-        if ev_info and ebitda_info and ebitda_info > 0:
-            metrics['EV/EBITDA'] = ev_info / ebitda_info
-            metrics['Source'] = 'Yahoo Parçalı Hesap'
             return metrics
 
-        # YÖNTEM C: Manuel İnşaat (Son Çare)
+        # Yöntem B: Manuel İnşaat (Apple/Toyota Gibi Zorlu Hisseler İçin)
         mcap = stock.fast_info.get('market_cap')
         if mcap:
             bs = stock.balance_sheet
@@ -213,19 +204,30 @@ def fetch_robust_metrics(ticker):
             if not bs.empty and not inc.empty:
                 curr_bs = bs.iloc[:, 0]; curr_inc = inc.iloc[:, 0]
                 
-                # EV Hesabı
+                # Debt: Geniş Tarama
                 debt = find_value_in_df(curr_bs, ['total', 'debt'])
                 if debt is None:
-                    debt = (find_value_in_df(curr_bs, ['long', 'debt']) or 0) + (find_value_in_df(curr_bs, ['short', 'debt']) or 0)
-                cash = find_value_in_df(curr_bs, ['cash', 'equivalents']) or 0
+                    # Parça pinçik topla
+                    d1 = find_value_in_df(curr_bs, ['long', 'debt']) or 0
+                    d2 = find_value_in_df(curr_bs, ['short', 'debt']) or 0
+                    d3 = find_value_in_df(curr_bs, ['financial', 'debt']) or 0
+                    d4 = find_value_in_df(curr_bs, ['term', 'debt']) or 0
+                    debt = max(d1+d2, d3, d4) # En mantıklı olanı al
+                
+                # Cash
+                cash = find_value_in_df(curr_bs, ['cash', 'equivalents']) or find_value_in_df(curr_bs, ['cash']) or 0
+                
+                # EV = Mcap + Debt - Cash
                 ev_calc = mcap + (debt or 0) - cash
                 
-                # EBITDA Hesabı
-                ebitda_calc = find_value_in_df(curr_inc, ['normalized', 'ebitda'])
-                if ebitda_calc is None: ebitda_calc = find_value_in_df(curr_inc, ['ebitda'])
+                # EBITDA: Zorunlu İnşaat
+                ebitda_calc = find_value_in_df(curr_inc, ['normalized', 'ebitda']) or find_value_in_df(curr_inc, ['ebitda'])
                 if ebitda_calc is None:
-                    op_inc = find_value_in_df(curr_inc, ['operating', 'income']) or 0
-                    dep = find_value_in_df(stock.cashflow.iloc[:, 0], ['depreciation']) or 0 if not stock.cashflow.empty else 0
+                    # Operating Income + Depreciation (Kesin Çözüm)
+                    op_inc = find_value_in_df(curr_inc, ['operating', 'income']) or find_value_in_df(curr_inc, ['operating', 'profit']) or 0
+                    dep = 0
+                    if not stock.cashflow.empty:
+                        dep = find_value_in_df(stock.cashflow.iloc[:, 0], ['depreciation']) or 0
                     if op_inc: ebitda_calc = op_inc + dep
                 
                 if ev_calc and ebitda_calc and ebitda_calc > 0:
