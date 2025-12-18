@@ -8,18 +8,18 @@ import time
 import numpy as np
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v21", layout="wide")
-st.title("📊 Akademik Karar Destek Sistemi (Restorasyon Sürümü)")
+st.set_page_config(page_title="Akademik Analiz v22", layout="wide")
+st.title("📊 Akademik Karar Destek Sistemi (Hesaplama Motorlu)")
 st.markdown("""
-**Altyapı:** v16 Mimarisi (Stabil) + Finviz Pagination (Tüm Piyasa)
-**Özellik:** Fiyat/Ortalama Grafikleri + Kanıta Dayalı Yorumlama + Hibrit Veri
+**Yöntem:** Finviz Taraması + **Manuel Rasyo Hesaplama**
+**Düzeltme:** EV/EBITDA verisi hazır alınmaz, Bilanço ve Gelir tablosundan anlık hesaplanır (Kesin Sonuç).
 """)
 
 # --- Session State ---
 if 'scan_data' not in st.session_state:
     st.session_state.scan_data = pd.DataFrame()
 
-# --- YAN MENÜ (v16 Filtreleri - EKSİKSİZ) ---
+# --- YAN MENÜ (v16 Filtreleri) ---
 st.sidebar.header("🔍 Çok Katmanlı Filtreleme")
 
 # 0. Evren Genişliği
@@ -50,35 +50,86 @@ st.sidebar.markdown("### 2. Teknik Filtreler")
 rsi_filter = st.sidebar.selectbox("RSI (Momentum)", ["Any", "Oversold (<30)", "Overbought (>70)", "Neutral (40-60)"], index=0)
 price_ma = st.sidebar.selectbox("Fiyat vs MA200", ["Any", "Above SMA200", "Below SMA200"], index=0)
 
-# --- MATEMATİKSEL HESAPLAMA MODÜLÜ ---
+# --- GELİŞMİŞ HESAPLAMA MOTORU (Calculation Engine) ---
+def fetch_calculated_metrics(ticker):
+    """
+    Hazır veriye güvenmez. Bilançoyu çeker ve EV/EBITDA'yı kendisi hesaplar.
+    """
+    metrics = {
+        'EV/EBITDA': None,
+        'FCF': None,
+        'Source': 'Bilinmiyor'
+    }
+    
+    try:
+        stock = yf.Ticker(ticker)
+        
+        # 1. Önce .info'yu dene (En hızlısı)
+        info = stock.info
+        if info.get('enterpriseToEbitda'):
+            metrics['EV/EBITDA'] = info.get('enterpriseToEbitda')
+            metrics['Source'] = 'Yahoo Info (Hazır)'
+        
+        # 2. Eğer boşsa, MANUEL HESAPLA (En garantisi)
+        if metrics['EV/EBITDA'] is None:
+            # Gerekli tabloları çek
+            bs = stock.balance_sheet      # Bilanço
+            inc = stock.income_stmt       # Gelir Tablosu
+            
+            if not bs.empty and not inc.empty:
+                # En son dönem (son sütun)
+                latest_bs = bs.iloc[:, 0]
+                latest_inc = inc.iloc[:, 0]
+                
+                # Market Cap (Fast Info'dan gelir, güvenilirdir)
+                mcap = stock.fast_info['market_cap']
+                
+                # Verileri Bul (Farklı isimlendirmelere karşı try-except)
+                try:
+                    total_debt = latest_bs.get('Total Debt', 0)
+                    cash = latest_bs.get('Cash And Cash Equivalents', 0)
+                    
+                    # Enterprise Value = Market Cap + Debt - Cash
+                    ev = mcap + total_debt - cash
+                    
+                    # EBITDA Bul
+                    ebitda = latest_inc.get('EBITDA', latest_inc.get('Normalized EBITDA', 0))
+                    
+                    if ebitda and ebitda > 0:
+                        metrics['EV/EBITDA'] = ev / ebitda
+                        metrics['Source'] = 'Akademik Hesaplama (Bilanço)'
+                except:
+                    pass
+
+        # 3. Serbest Nakit Akışı (FCF)
+        if info.get('freeCashflow'):
+            metrics['FCF'] = info.get('freeCashflow')
+        
+    except Exception as e:
+        pass
+        
+    return metrics
+
+# --- İNDİKATÖR HESAPLAMA ---
 def calculate_indicators(df):
-    """
-    Yahoo'dan gelen ham fiyat verisinden (History) indikatörleri biz hesaplarız.
-    Bu yöntem .info verisine göre çok daha güvenilirdir.
-    """
     df = df.copy()
-    # Hareketli Ortalamalar
     df['MA50'] = df['Close'].rolling(window=50).mean()
     df['MA200'] = df['Close'].rolling(window=200).mean()
     
-    # RSI
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # Volatilite (Yıllık)
     df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
     df['Volatility'] = df['Log_Ret'].rolling(window=30).std() * np.sqrt(252) * 100
     
-    # Max Drawdown
     rolling_max = df['Close'].expanding().max()
     df['Drawdown'] = (df['Close'] - rolling_max) / rolling_max * 100
-    
     return df
 
-# --- VERİ MOTORU (Finviz Scraper - Cerrah Modu) ---
+# --- FİNVİZ TARAMA ---
 def get_finviz_data(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
     filters = []
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
@@ -143,66 +194,51 @@ def get_finviz_data(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val
         return pd.concat(all_dfs).drop_duplicates(subset=['Ticker']).reset_index(drop=True), base_url
     return pd.DataFrame(), base_url
 
-# --- AKILLI YORUM MOTORU ---
-def generate_academic_report(ticker, finviz_row, yahoo_info, hist_df):
+# --- AKADEMİK RAPORLAYICI ---
+def generate_report(ticker, finviz_row, metrics, hist):
     comments = []
     
-    # Veri Hazırlığı
-    last_row = hist_df.iloc[-1]
-    curr_price = last_row['Close']
-    ma50 = last_row['MA50']
-    ma200 = last_row['MA200']
-    rsi = last_row['RSI']
-    volatility = last_row['Volatility']
+    last = hist.iloc[-1]
+    curr = last['Close']
+    ma50 = last['MA50']
+    ma200 = last['MA200']
+    rsi = last['RSI']
     
-    ev_ebitda = yahoo_info.get('enterpriseToEbitda', None)
-    
-    try: pe = float(str(finviz_row['P/E']).replace('-', '0'))
+    evebitda = metrics.get('EV/EBITDA')
+    pe_str = str(finviz_row['P/E']).replace('-','0')
+    try: pe = float(pe_str)
     except: pe = 0
 
-    # 1. TEKNİK TREND ANALİZİ (Kanıta Dayalı)
-    if curr_price > ma200:
-        trend = "YÜKSELİŞ"
-        icon = "📈"
-        desc = "Fiyat 200 günlük ortalamanın üzerinde."
+    # 1. TREND YORUMU
+    if curr > ma200:
+        trend_status = "YÜKSELİŞ"
+        trend_icon = "📈"
     else:
-        trend = "DÜŞÜŞ/ZAYIF"
-        icon = "📉"
-        desc = "Fiyat 200 günlük ortalamanın altında."
+        trend_status = "DÜŞÜŞ"
+        trend_icon = "📉"
         
-    comments.append(f"{icon} **Genel Trend:** {trend} ({desc})")
+    comments.append(f"{trend_icon} **Genel Trend:** {trend_status} (Fiyat 200 günlük ortalamaya göre konumlandırıldı).")
     
-    if curr_price > ma50:
-        comments.append(f"✅ **Kısa Vade:** Fiyat (${curr_price:.2f}), 50 günlük ortalamanın (${ma50:.2f}) üzerinde, momentum pozitif.")
-    else:
-        comments.append(f"⚠️ **Kısa Vade:** Fiyat (${curr_price:.2f}), 50 günlük ortalamanın (${ma50:.2f}) altına sarkmış.")
+    # 2. MOMENTUM VE RSI
+    rsi_desc = "Nötr"
+    if rsi < 30: rsi_desc = "Aşırı Satım (Fırsat Bölgesi)"
+    elif rsi > 70: rsi_desc = "Aşırı Alım (Risk Bölgesi)"
+    
+    comments.append(f"⏱️ **Momentum:** RSI göstergesi **{rsi:.0f}** seviyesinde ({rsi_desc}).")
 
-    # 2. RİSK VE MOMENTUM
-    if rsi < 30:
-        comments.append(f"💎 **RSI Sinyali:** {rsi:.0f} (Aşırı Satım). Teknik olarak tepki alımı beklenebilir.")
-    elif rsi > 70:
-        comments.append(f"🔥 **RSI Sinyali:** {rsi:.0f} (Aşırı Alım). Düzeltme riski artmış.")
-    else:
-        comments.append(f"⚖️ **RSI:** {rsi:.0f} (Nötr Bölge).")
+    # 3. DEĞERLEME ANALİZİ (Hesaplanan EV/EBITDA ile)
+    if evebitda and evebitda > 0:
+        val_msg = f"ℹ️ **EV/EBITDA:** {evebitda:.2f} ({metrics['Source']})."
         
-    if volatility > 60:
-        comments.append(f"⚡ **Yüksek Volatilite:** Yıllık oynaklık %{volatility:.1f}. Risk iştahı düşük yatırımcı için uygun olmayabilir.")
-
-    # 3. DEĞERLEME SENTEZİ (Finviz + Yahoo)
-    valuation_note = ""
-    if ev_ebitda:
-        if pe > 0 and pe < 15 and ev_ebitda > 20:
-             valuation_note = "🚨 **Uyarı:** F/K düşük ama EV/EBITDA yüksek. Borçluluk veya amortisman kaynaklı bir değer tuzağı olabilir."
-        elif ev_ebitda < 10:
-             valuation_note = "✅ **Onay:** EV/EBITDA rasyosu 10'un altında, şirket işletme değeri açısından da ucuz."
-        else:
-             valuation_note = f"ℹ️ **EV/EBITDA:** {ev_ebitda:.2f}"
+        if pe > 0 and pe < 15 and evebitda > 18:
+            val_msg += " ⚠️ **Uyarı:** F/K düşük ama EV/EBITDA yüksek. Borç yapısına dikkat edilmeli."
+        elif evebitda < 8:
+            val_msg += " ✅ **Fırsat:** Şirket işletme değeri bazında kelepir fiyatlanıyor."
+            
+        comments.append(val_msg)
     else:
-        # PDYN gibi durumlar için
-        valuation_note = "ℹ️ **EV/EBITDA:** Hesapla-namadı (Şirket zarar ediyor veya veri eksik)."
+        comments.append("ℹ️ **EV/EBITDA:** Hesaplanamadı (Şirket zarar ediyor, EBITDA negatif veya veri eksik).")
 
-    comments.append(valuation_note)
-    
     return comments
 
 # --- ANA AKIŞ ---
@@ -214,7 +250,7 @@ if st.sidebar.button("Karar Destek Analizini Başlat"):
 
 if not st.session_state.scan_data.empty:
     df = st.session_state.scan_data
-    st.success(f"✅ {len(df)} Şirket Bulundu")
+    st.success(f"✅ {len(df)} Şirket Listelendi")
     st.caption(f"Veri Kaynağı: {st.session_state.url}")
     st.dataframe(df, use_container_width=True)
     
@@ -223,69 +259,63 @@ if not st.session_state.scan_data.empty:
     col1, col2 = st.columns([5, 4])
     
     with col1:
-        st.subheader("📉 Teknik Grafik & İndikatörler")
+        st.subheader("📉 Teknik Grafik")
         tik = st.selectbox("Detaylı Analiz İçin Hisse Seç:", df['Ticker'].tolist())
         
-        yahoo_info = {}
         hist = pd.DataFrame()
+        adv_metrics = {}
         
         if tik:
-            try:
-                # Yahoo Veri Çekme (Lazy Load)
-                stock = yf.Ticker(tik)
-                hist = stock.history(period="1y")
-                
-                # Grafik oluşturmak için geçmiş veri şart
-                if not hist.empty:
-                    # İndikatörleri Hesapla
-                    hist = calculate_indicators(hist)
-                    
-                    # GRAFİK ÇİZİMİ (Candlestick + MA) - v16 Tipi
-                    fig = go.Figure()
-                    
-                    # Mum Grafiği
-                    fig.add_trace(go.Candlestick(x=hist.index,
-                                    open=hist['Open'], high=hist['High'],
-                                    low=hist['Low'], close=hist['Close'],
-                                    name='Fiyat'))
-                    
-                    # Hareketli Ortalamalar
-                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA50'], line=dict(color='blue', width=1), name='SMA 50'))
-                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA200'], line=dict(color='orange', width=2), name='SMA 200'))
-                    
-                    fig.update_layout(title=f"{tik} - Teknik Analiz", height=500, xaxis_rangeslider_visible=False)
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Yan Veri Çekme (Info)
-                    try: yahoo_info = stock.info
-                    except: yahoo_info = {}
-                    
-                else:
-                    st.warning("Bu hisse için grafik verisi bulunamadı.")
-            except Exception as e:
-                st.error(f"Hata: {e}")
+            with st.spinner(f"{tik} için bilanço hesaplamaları yapılıyor..."):
+                # 1. Grafik Verisi
+                try:
+                    stock = yf.Ticker(tik)
+                    hist = stock.history(period="1y")
+                    if not hist.empty:
+                        hist = calculate_indicators(hist)
+                        
+                        # 2. İleri Metrik Hesaplama (EV/EBITDA)
+                        adv_metrics = fetch_calculated_metrics(tik)
+                        
+                        # GRAFİK
+                        fig = go.Figure()
+                        fig.add_trace(go.Candlestick(x=hist.index, open=hist['Open'], high=hist['High'], low=hist['Low'], close=hist['Close'], name='Fiyat'))
+                        fig.add_trace(go.Scatter(x=hist.index, y=hist['MA50'], line=dict(color='blue', width=1), name='SMA 50'))
+                        fig.add_trace(go.Scatter(x=hist.index, y=hist['MA200'], line=dict(color='orange', width=2), name='SMA 200'))
+                        fig.update_layout(title=f"{tik} - Teknik Görünüm", height=500, xaxis_rangeslider_visible=False)
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("Grafik verisi yok.")
+                except Exception as e:
+                    st.error(f"Hata: {e}")
 
     with col2:
         if tik and not hist.empty:
             st.subheader("🧠 Akademik Karar Raporu")
             
-            # Finviz Satırı
-            row = df[df['Ticker'] == tik].iloc[0]
+            fin_row = df[df['Ticker'] == tik].iloc[0]
             
-            # Rapor Oluştur
-            comments = generate_academic_report(tik, row, yahoo_info, hist)
+            # Raporu Üret
+            comments = generate_report(tik, fin_row, adv_metrics, hist)
             
-            # Yorumları Yazdır
             for c in comments:
                 st.info(c)
             
             st.markdown("---")
-            # Risk Kartları
+            
+            # Risk Metrikleri
             last = hist.iloc[-1]
             c1, c2, c3 = st.columns(3)
             c1.metric("Volatilite", f"%{last['Volatility']:.1f}")
             c2.metric("Max Drawdown", f"%{last['Drawdown']:.1f}")
-            c3.metric("RSI (14)", f"{last['RSI']:.0f}")
+            
+            fcf_val = adv_metrics.get('FCF')
+            if fcf_val:
+                c3.metric("FCF (Yıllık)", f"${fcf_val/1e9:.2f}B")
+            else:
+                c3.metric("FCF", "-")
+                
+            st.caption("Not: EV/EBITDA verisi Yahoo 'Summary' veya 'Bilanço' verilerinden anlık hesaplanmıştır.")
 
 elif st.session_state.scan_data.empty:
-    st.info("👈 Sol menüden kriterleri seçip **'Karar Destek Analizini Başlat'** butonuna basınız.")
+    st.info("👈 Kriterleri belirleyip 'Karar Destek Analizini Başlat' butonuna basınız.")
