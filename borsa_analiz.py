@@ -9,11 +9,11 @@ import numpy as np
 import re
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v39", layout="wide")
-st.title("📊 Akademik Karar Destek Sistemi (Tam Ekran)")
+st.set_page_config(page_title="Akademik Analiz v40", layout="wide")
+st.title("📊 Akademik Karar Destek Sistemi (EV/EBITDA Fix)")
 st.markdown("""
-**Düzeltme:** Karar raporundaki kaybolan Teknik ve Temel veri listeleri (EV/EBITDA, FCF vb.) geri getirildi.
-**Durum:** Dedektif modu, Türkçe haberler ve Sözel analiz aktiftir.
+**Düzeltme:** EV/EBITDA verisi için 3 katmanlı (Hazır Veri -> Parçalı Veri -> Manuel Hesap) algoritma kuruldu.
+**Durum:** Tüm modüller (Haberler, Dedektif, Sözel Analiz) aktiftir.
 """)
 
 # --- Session State ---
@@ -57,6 +57,7 @@ def translate_to_turkish(text):
 
 # --- YARDIMCI FONKSİYONLAR ---
 def find_value_in_df(df, keywords):
+    """DataFrame içinde anahtar kelime arar ve bulduğu ilk değeri döner."""
     if df is None or df.empty: return None
     for index_name in df.index:
         name_str = str(index_name).lower()
@@ -92,7 +93,7 @@ def generate_news_summary(news_list):
 @st.cache_data(ttl=1800) 
 def generate_skeptic_analysis(ticker):
     analysis = []
-    time.sleep(1.5) 
+    time.sleep(1.0) 
     try:
         stock = yf.Ticker(ticker)
         inc = stock.income_stmt
@@ -128,7 +129,7 @@ def generate_verbal_financial_analysis(ticker):
             if rev and gp:
                 margin = (gp / rev) * 100
                 desc = "Çok Yüksek" if margin > 70 else ("Sağlıklı" if margin > 40 else "Düşük")
-                analysis.append(f"📊 **Gelir Yapısı:** Ciro: **{format_currency(rev)}**, Brüt Kâr: **{format_currency(gp)}**. Marj: **%{margin:.1f}** ({desc}).")
+                analysis.append(f"📊 **Gelir Yapısı:** Şirket **{format_currency(rev)}** ciro üzerinden **{format_currency(gp)}** brüt kâr elde etmiştir. Marj: **%{margin:.1f}** ({desc}).")
             net = find_value_in_df(curr_inc, ['net', 'income'])
             if net:
                 if net > 0: analysis.append(f"💰 **Net Kârlılık:** **{format_currency(net)}** net kâr (Pozitif).")
@@ -170,40 +171,68 @@ def get_finviz_news_profile(ticker):
     except: pass
     return data
 
-# --- METRİKLER VE TEKNİK ---
+# --- METRİKLER VE TEKNİK (DÜZELTİLEN YER) ---
 def fetch_robust_metrics(ticker):
     metrics = {'EV/EBITDA': None, 'FCF': None, 'Source': '-'}
     try:
         stock = yf.Ticker(ticker)
+        
+        # --- ADIM 1: FCF (Nakit Akışı) ---
         try:
             cf = stock.cashflow
             if not cf.empty:
                 curr_cf = cf.iloc[:, 0]
-                ocf = find_value_in_df(curr_cf, ['operating', 'cash'])
+                ocf = find_value_in_df(curr_cf, ['operating', 'cash']) or find_value_in_df(curr_cf, ['operating', 'activities'])
                 capex = find_value_in_df(curr_cf, ['capital', 'expenditure']) or find_value_in_df(curr_cf, ['purchase', 'property']) or 0
                 if ocf is not None: metrics['FCF'] = ocf - abs(capex)
         except: pass
         if metrics['FCF'] is None: metrics['FCF'] = stock.info.get('freeCashflow')
 
-        try:
-            metrics['EV/EBITDA'] = stock.info.get('enterpriseToEbitda')
-            if metrics['EV/EBITDA'] is None:
-                mcap = stock.fast_info['market_cap']
-                bs = stock.balance_sheet; inc = stock.income_stmt
-                if not bs.empty and not inc.empty:
-                    curr_bs = bs.iloc[:, 0]; curr_inc = inc.iloc[:, 0]
-                    debt = find_value_in_df(curr_bs, ['total', 'debt']) or (find_value_in_df(curr_bs, ['long', 'debt']) or 0) + (find_value_in_df(curr_bs, ['short', 'debt']) or 0)
-                    cash = find_value_in_df(curr_bs, ['cash', 'equivalents']) or 0
-                    ebitda = find_value_in_df(curr_inc, ['ebitda'])
-                    if ebitda is None:
-                        ebit = find_value_in_df(curr_inc, ['operating', 'income']) or 0
-                        dep = find_value_in_df(stock.cashflow.iloc[:, 0], ['depreciation']) or 0 if not stock.cashflow.empty else 0
-                        if ebit: ebitda = ebit + dep
-                    if mcap and ebitda and ebitda > 0:
-                        metrics['EV/EBITDA'] = (mcap + debt - cash) / ebitda
-                        metrics['Source'] = 'Bilanço (Manuel)'
-        except: pass
-    except: pass
+        # --- ADIM 2: EV/EBITDA (KESİN ÇÖZÜM) ---
+        
+        # YÖNTEM A: Önce Hazır Veriyi Kontrol Et (En Güveniliri)
+        ev_ebitda_info = stock.info.get('enterpriseToEbitda')
+        if ev_ebitda_info and ev_ebitda_info > 0:
+            metrics['EV/EBITDA'] = ev_ebitda_info
+            metrics['Source'] = 'Yahoo Info'
+            return metrics # Bulduysan dön, daha fazla uğraşma
+
+        # YÖNTEM B: Hazır Bileşenlerden Hesapla
+        ev_info = stock.info.get('enterpriseValue')
+        ebitda_info = stock.info.get('ebitda')
+        if ev_info and ebitda_info and ebitda_info > 0:
+            metrics['EV/EBITDA'] = ev_info / ebitda_info
+            metrics['Source'] = 'Yahoo Parçalı Hesap'
+            return metrics
+
+        # YÖNTEM C: Manuel İnşaat (Son Çare)
+        mcap = stock.fast_info.get('market_cap')
+        if mcap:
+            bs = stock.balance_sheet
+            inc = stock.income_stmt
+            if not bs.empty and not inc.empty:
+                curr_bs = bs.iloc[:, 0]; curr_inc = inc.iloc[:, 0]
+                
+                # EV Hesabı
+                debt = find_value_in_df(curr_bs, ['total', 'debt'])
+                if debt is None:
+                    debt = (find_value_in_df(curr_bs, ['long', 'debt']) or 0) + (find_value_in_df(curr_bs, ['short', 'debt']) or 0)
+                cash = find_value_in_df(curr_bs, ['cash', 'equivalents']) or 0
+                ev_calc = mcap + (debt or 0) - cash
+                
+                # EBITDA Hesabı
+                ebitda_calc = find_value_in_df(curr_inc, ['normalized', 'ebitda'])
+                if ebitda_calc is None: ebitda_calc = find_value_in_df(curr_inc, ['ebitda'])
+                if ebitda_calc is None:
+                    op_inc = find_value_in_df(curr_inc, ['operating', 'income']) or 0
+                    dep = find_value_in_df(stock.cashflow.iloc[:, 0], ['depreciation']) or 0 if not stock.cashflow.empty else 0
+                    if op_inc: ebitda_calc = op_inc + dep
+                
+                if ev_calc and ebitda_calc and ebitda_calc > 0:
+                    metrics['EV/EBITDA'] = ev_calc / ebitda_calc
+                    metrics['Source'] = 'Bilanço (Manuel)'
+
+    except Exception: pass
     return metrics
 
 def calculate_ta(df):
@@ -227,7 +256,6 @@ def generate_technical_synthesis(hist):
     risk_txt = f" Zirveden düşüş **%{abs(dd):.1f}**."
     return f"{trend_txt} {mom_txt} {risk_txt}"
 
-# --- RAPORLAMA FONKSİYONU (DÜZELTİLEN YER) ---
 def generate_holistic_report(ticker, finviz_row, metrics, hist):
     last = hist.iloc[-1]; curr = last['Close']; ma200 = last['MA200']; evebitda = metrics.get('EV/EBITDA'); fcf = metrics.get('FCF')
     is_uptrend = curr > (ma200 if pd.notna(ma200) else 0)
@@ -246,11 +274,10 @@ def generate_holistic_report(ticker, finviz_row, metrics, hist):
         if valuation == "Ucuz": sentiment = "DEĞER YATIRIMI"; color = "blue"; reason = "Trend Aşağı + EV/EBITDA < 10"
         elif valuation == "Pahalı": sentiment = "SAT / UZAK DUR"; color = "red"; reason = "Hem düşüşte hem pahalı."
         else: sentiment = "ZAYIF GÖRÜNÜM"; color = "red"
-        
+    
     st.markdown(f"#### 🏛️ Yönetici Özeti: :{color}[{sentiment}]")
     st.info(f"**Gerekçe:** {reason}")
     
-    # --- İŞTE GERİ GELEN KISIM ---
     st.markdown("---")
     c1, c2 = st.columns(2)
     with c1:
@@ -270,7 +297,7 @@ def generate_holistic_report(ticker, finviz_row, metrics, hist):
     st.markdown("---")
 
 # --- FİNVİZ TARAYICI ---
-def get_finviz_v39(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
+def get_finviz_v40(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
     filters = []
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
     sec_map = {"Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices", "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive", "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare", "Industrials": "sec_industrials", "Real Estate": "sec_realestate", "Technology": "sec_technology", "Utilities": "sec_utilities"}
@@ -322,7 +349,7 @@ def get_finviz_v39(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val)
 # --- UI AKIŞI ---
 if st.sidebar.button("Analizi Başlat"):
     with st.spinner("Piyasa taranıyor..."):
-        df, url = get_finviz_v39(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
+        df, url = get_finviz_v40(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
         st.session_state.scan_data = df
         st.session_state.url = url
 
