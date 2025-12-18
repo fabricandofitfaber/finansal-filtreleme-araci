@@ -9,11 +9,11 @@ import numpy as np
 import re
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v44", layout="wide")
-st.title("📊 Akademik Karar Destek Sistemi (EV/EBITDA Garantili)")
+st.set_page_config(page_title="Akademik Analiz v45", layout="wide")
+st.title("📊 Akademik Karar Destek Sistemi (Survivor Mod)")
 st.markdown("""
-**Düzeltme:** EV/EBITDA hesaplamasında 'Agresif Tamamlama' modu. (Eksik veriyi 0 kabul edip hesabı tamamlar).
-**Durum:** Apple (AAPL) dahil tüm hisselerde değerleme çarpanı gösterilir.
+**Düzeltme:** Bilanço verisi engellendiğinde, elimizdeki Nakit Akışı (FCF) verisi kullanılarak yaklaşık EV/EBITDA üretilir.
+**Garanti:** FCF verisi varsa, Değerleme çarpanı mutlaka gösterilir.
 """)
 
 # --- Session State ---
@@ -59,15 +59,11 @@ def translate_to_turkish(text):
 def find_value_in_df(df, keywords):
     """DataFrame içinde anahtar kelime arar ve bulduğu ilk değeri döner."""
     if df is None or df.empty: return None
-    # İndeksleri string'e çevirip küçük harf yap
     df.index = df.index.map(str).str.lower()
-    
     for k in keywords:
         k_lower = k.lower()
-        # İndeks içinde geçen kelimeyi ara (Partial Match)
         matches = [idx for idx in df.index if k_lower in idx]
         if matches:
-            # İlk eşleşmeyi al
             try:
                 val = df.loc[matches[0]]
                 if isinstance(val, pd.Series): return val.iloc[0]
@@ -145,7 +141,6 @@ def generate_verbal_financial_analysis(ticker):
                 if net > 0: analysis.append(f"💰 **Net Kârlılık:** **{format_currency(net)}** net kâr (Pozitif).")
                 else: analysis.append(f"⚠️ **Kârlılık:** **{format_currency(net)}** net zarar.")
             
-            # Daha geniş arama
             op_inc = find_value_in_df(curr_inc, ['operating income', 'operating profit', 'ebit'])
             if op_inc: analysis.append(f"⚙️ **Operasyonel Güç:** Faaliyet Kârı **{format_currency(op_inc)}**.")
             
@@ -158,110 +153,104 @@ def generate_verbal_financial_analysis(ticker):
     except Exception: return ["Veri çekilemedi."]
     return analysis
 
-# --- FİNVİZ HABER (YEDEKLİ) ---
+# --- FİNVİZ HABER ---
 @st.cache_data(ttl=1800)
 def get_finviz_news_profile(ticker):
-    """Finviz öncelikli, Yahoo yedekli haber çekici."""
+    url = f"https://finviz.com/quote.ashx?t={ticker}"
+    headers = {'User-Agent': 'Mozilla/5.0'}
     data = {"Profile": "Bulunamadı", "News": []}
-    
-    # 1. Finviz
     try:
-        url = f"https://finviz.com/quote.ashx?t={ticker}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        r = requests.get(url, headers=headers, timeout=3)
-        if r.status_code == 200:
-            soup = BeautifulSoup(r.text, 'html.parser')
-            profile_td = soup.find("td", class_="fullview-profile")
-            if profile_td: 
-                raw_profile = profile_td.get_text(strip=True)
-                data["Profile"] = translate_to_turkish(raw_profile)
-            news_table = soup.find("table", id="news-table")
-            if news_table:
-                for row in news_table.find_all("tr")[:8]:
-                    cols = row.find_all("td")
-                    if len(cols) > 1:
-                        data["News"].append({"Date": cols[0].get_text(strip=True), "Title": cols[1].get_text(strip=True), "Link": cols[1].find("a")['href']})
+        r = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        profile_td = soup.find("td", class_="fullview-profile")
+        if profile_td: 
+            raw_profile = profile_td.get_text(strip=True)
+            data["Profile"] = translate_to_turkish(raw_profile)
+        news_table = soup.find("table", id="news-table")
+        if news_table:
+            rows = news_table.find_all("tr")
+            for row in rows[:8]:
+                cols = row.find_all("td")
+                if len(cols) > 1:
+                    date_str = cols[0].get_text(strip=True)
+                    headline = cols[1].get_text(strip=True)
+                    link = cols[1].find("a")['href']
+                    data["News"].append({"Date": date_str, "Title": headline, "Link": link})
     except: pass
-
-    # 2. Yahoo Yedeği (Eğer Finviz boşsa)
-    if not data["News"] or data["Profile"] == "Bulunamadı":
-        try:
-            stock = yf.Ticker(ticker)
-            if data["Profile"] == "Bulunamadı":
-                summ = stock.info.get('longBusinessSummary')
-                if summ: data["Profile"] = translate_to_turkish(summ)
-            if not data["News"]:
-                yf_news = stock.news
-                if yf_news:
-                    for n in yf_news[:8]:
-                        ts = n.get('providerPublishTime', 0)
-                        d_str = time.strftime('%Y-%m-%d', time.localtime(ts))
-                        data["News"].append({"Date": d_str, "Title": n.get('title'), "Link": n.get('link')})
-        except: pass
-        
     return data
 
-# --- METRİKLER VE TEKNİK (AGRESİF HESAPLAMA) ---
+# --- METRİKLER VE TEKNİK (SURVIVOR MODU) ---
 def fetch_robust_metrics(ticker):
     metrics = {'EV/EBITDA': None, 'FCF': None, 'Source': '-'}
+    
+    # Değişkenleri baştan tanımla (Hata önlemek için)
+    ocf = 0
+    
     try:
         stock = yf.Ticker(ticker)
         
-        # 1. FCF
+        # 1. FCF HESAPLAMA (Önce bunu yap ki OCF elimizde olsun)
         try:
             cf = stock.cashflow
             if not cf.empty:
                 curr_cf = cf.iloc[:, 0]
-                ocf = find_value_in_df(curr_cf, ['operating', 'operating cash flow'])
-                capex = find_value_in_df(curr_cf, ['capital', 'capital expenditure']) or 0
-                if ocf: metrics['FCF'] = ocf - abs(capex)
+                ocf = find_value_in_df(curr_cf, ['operating', 'operating cash flow', 'cash from operating']) or 0
+                capex = find_value_in_df(curr_cf, ['capital', 'capital expenditure']) or find_value_in_df(curr_cf, ['purchase', 'property']) or 0
+                if ocf != 0: 
+                    metrics['FCF'] = ocf - abs(capex)
         except: pass
-        if metrics['FCF'] is None: metrics['FCF'] = stock.info.get('freeCashflow')
+        
+        # FCF Yedeği
+        if metrics['FCF'] is None: 
+            metrics['FCF'] = stock.info.get('freeCashflow')
+            if metrics['FCF'] and ocf == 0: ocf = metrics['FCF'] # Tahmini OCF
 
-        # 2. EV/EBITDA (AGRESİF MOD)
+        # 2. EV/EBITDA (HAYATTA KALMA MODU)
+        
         # A) Hazır Veri
-        ev_ebitda = stock.info.get('enterpriseToEbitda')
-        if ev_ebitda:
-            metrics['EV/EBITDA'] = ev_ebitda
+        ev_ebitda_info = stock.info.get('enterpriseToEbitda')
+        if ev_ebitda_info and ev_ebitda_info > 0:
+            metrics['EV/EBITDA'] = ev_ebitda_info
             metrics['Source'] = 'Yahoo Info'
             return metrics
 
-        # B) Manuel Hesap
+        # B) Manuel Hesaplama (Gerekirse Parçaları Uydur)
         mcap = stock.fast_info.get('market_cap')
         if mcap:
-            bs = stock.balance_sheet
-            inc = stock.income_stmt
-            if not bs.empty and not inc.empty:
-                curr_bs = bs.iloc[:, 0]
-                curr_inc = inc.iloc[:, 0]
-                
-                # Debt: Varsa al, yoksa 0 kabul et (Pes etme)
-                debt = find_value_in_df(curr_bs, ['total debt', 'long term debt', 'financial debt']) or 0
-                
-                # Cash
-                cash = find_value_in_df(curr_bs, ['cash', 'cash and cash equivalents']) or 0
-                
-                # EV Hesabı
-                ev = mcap + debt - cash
-                
-                # EBITDA Hesabı
-                ebitda = find_value_in_df(curr_inc, ['ebitda', 'normalized ebitda'])
-                if ebitda is None:
-                    # Operating Income + Depreciation
-                    op_inc = find_value_in_df(curr_inc, ['operating income', 'operating profit', 'ebit']) or 0
-                    dep = 0
-                    if not stock.cashflow.empty:
-                        dep = find_value_in_df(stock.cashflow.iloc[:, 0], ['depreciation']) or 0
-                    ebitda = op_inc + dep
-                
-                # Bölme İşlemi (Sıfıra bölme hatası olmasın)
-                if ebitda and ebitda > 0:
-                    metrics['EV/EBITDA'] = ev / ebitda
-                    metrics['Source'] = 'Manuel (Agresif)'
-                elif ebitda and ebitda < 0:
-                    metrics['EV/EBITDA'] = 0 # Negatif EBITDA (Zarar)
-                    metrics['Source'] = 'Negatif EBITDA'
+            ev_calc = mcap # Başlangıç değeri (Borç yoksa bu kullanılır)
+            ebitda_calc = 0
+            
+            # Bilanço Verisi Varsa Borcu Ekle
+            try:
+                bs = stock.balance_sheet
+                if not bs.empty:
+                    curr_bs = bs.iloc[:, 0]
+                    debt = find_value_in_df(curr_bs, ['total debt', 'long term debt']) or 0
+                    cash = find_value_in_df(curr_bs, ['cash', 'equivalents']) or 0
+                    ev_calc = mcap + debt - cash
+            except: pass
+            
+            # Gelir Tablosu Varsa EBITDA Çek
+            try:
+                inc = stock.income_stmt
+                if not inc.empty:
+                    ebitda_calc = find_value_in_df(inc.iloc[:, 0], ['ebitda', 'normalized ebitda'])
+                    if ebitda_calc is None:
+                        op_inc = find_value_in_df(inc.iloc[:, 0], ['operating income', 'ebit']) or 0
+                        ebitda_calc = op_inc # Amortismanı bulamazsan en azından bunu kullan
+            except: pass
+            
+            # SURVIVOR HAMLESİ: Eğer EBITDA hala yoksa ve OCF varsa, OCF kullan.
+            if (ebitda_calc is None or ebitda_calc == 0) and ocf != 0:
+                ebitda_calc = ocf
+                metrics['Source'] = 'EV/OCF (Tahmini)'
+            else:
+                metrics['Source'] = 'Bilanço (Manuel)'
 
+            # SON HESAP
+            if ev_calc > 0 and ebitda_calc and ebitda_calc > 0:
+                metrics['EV/EBITDA'] = ev_calc / ebitda_calc
+                
     except Exception: pass
     return metrics
 
@@ -321,14 +310,16 @@ def generate_holistic_report(ticker, finviz_row, metrics, hist):
     with c2:
         st.markdown("**💰 Temel Göstergeler**")
         val_str = f"{evebitda:.2f}" if evebitda is not None else "-"
-        st.write(f"• **EV/EBITDA:** {val_str} ({valuation})")
+        # Kaynak bilgisini parantez içinde gösterelim
+        src_str = f"({metrics['Source']})" if evebitda is not None else ""
+        st.write(f"• **EV/EBITDA:** {val_str} {src_str}")
         fcf_str = f"${fcf/1e9:.2f}B" if fcf else "-"
         st.write(f"• **FCF (Nakit):** {fcf_str}")
         st.write(f"• **F/K:** {finviz_row.get('P/E', '-')}")
     st.markdown("---")
 
 # --- FİNVİZ TARAYICI ---
-def get_finviz_v44(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
+def get_finviz_v45(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
     filters = []
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
     sec_map = {"Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices", "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive", "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare", "Industrials": "sec_industrials", "Real Estate": "sec_realestate", "Technology": "sec_technology", "Utilities": "sec_utilities"}
@@ -380,7 +371,7 @@ def get_finviz_v44(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val)
 # --- UI AKIŞI ---
 if st.sidebar.button("Analizi Başlat"):
     with st.spinner("Piyasa taranıyor..."):
-        df, url = get_finviz_v44(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
+        df, url = get_finviz_v45(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
         st.session_state.scan_data = df
         st.session_state.url = url
 
@@ -454,8 +445,7 @@ if not st.session_state.scan_data.empty:
             with tab_news:
                 st.subheader("Şirket Profili & Haberler")
                 with st.spinner("Haberler analiz ediliyor..."):
-                    # YENİ FONKSİYON KULLANIMI (Yedekli)
-                    finviz_data = get_finviz_news_profile(tik) # Burada v43'teki get_news_profile_robust yerine eski adı kullanmışız, v44 içinde adını güncelledim
+                    finviz_data = get_finviz_news_profile(tik)
                     st.markdown("### 🏢 Şirket Profili (Türkçe)")
                     st.caption(finviz_data.get('Profile', 'Bulunamadı'))
                     
