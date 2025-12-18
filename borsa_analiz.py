@@ -9,11 +9,11 @@ import numpy as np
 import re
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v36", layout="wide")
-st.title("📊 Akademik Karar Destek Sistemi (Dedektif Modu)")
+st.set_page_config(page_title="Akademik Analiz v37", layout="wide")
+st.title("📊 Akademik Karar Destek Sistemi (Stabil)")
 st.markdown("""
-**Yenilik:** 🕵️ **Dedektif Analizi:** Rakamların ardındaki hikayeyi (Küçülme, Verimlilik, Risk) okur.
-**Düzeltme:** Şirket profili artık Türkçe (Otomatik Çeviri).
+**Düzeltme:** 'NameError' hatası giderildi (Eksik fonksiyon eklendi).
+**İyileştirme:** 'Rate Limit' (Çok Fazla İstek) hatasını önlemek için önbellek ve zamanlayıcı eklendi.
 """)
 
 # --- Session State ---
@@ -39,33 +39,23 @@ rsi_filter = st.sidebar.selectbox("RSI", ["Any", "Oversold (<30)", "Overbought (
 price_ma = st.sidebar.selectbox("Fiyat vs MA200", ["Any", "Above SMA200", "Below SMA200"], index=0)
 
 # --- YARDIMCI: GOOGLE TRANSLATE (API'siz Hack) ---
+@st.cache_data(show_spinner=False)
 def translate_to_turkish(text):
-    """Basit bir istek ile Google Translate kullanarak metni çevirir."""
     if text == "Bulunamadı" or not text: return text
     try:
-        # Google Translate web arayüzüne istek atar (Kütüphanesiz çözüm)
         url = "https://translate.googleapis.com/translate_a/single"
-        params = {
-            "client": "gtx",
-            "sl": "en",
-            "tl": "tr",
-            "dt": "t",
-            "q": text
-        }
+        params = {"client": "gtx", "sl": "en", "tl": "tr", "dt": "t", "q": text}
         r = requests.get(url, params=params, timeout=5)
         if r.status_code == 200:
-            # Dönen JSON yapısı: [[["Çeviri", "Orijinal", ...], ...], ...]
             result = r.json()
             full_translation = ""
             for sentence in result[0]:
-                if sentence[0]:
-                    full_translation += sentence[0]
+                if sentence[0]: full_translation += sentence[0]
             return full_translation
-    except:
-        pass
-    return text + " (Çeviri Servisi Yanıt Vermedi)"
+    except: pass
+    return text
 
-# --- YARDIMCI: DF BULUCU ---
+# --- YARDIMCI: DF BULUCU & FORMAT ---
 def find_value_in_df(df, keywords):
     if df is None or df.empty: return None
     for index_name in df.index:
@@ -89,73 +79,105 @@ def analyze_news_sentiment(news_list):
     score = 0
     pos_keywords = ['beat', 'surge', 'jump', 'gain', 'profit', 'growth', 'positive', 'up', 'high', 'partnership', 'expand', 'launch', 'approve', 'buy', 'dividend', 'strong', 'reaffirm']
     neg_keywords = ['miss', 'fall', 'drop', 'loss', 'down', 'decline', 'negative', 'low', 'lawsuit', 'investigation', 'cut', 'fail', 'weak', 'risk', 'compliance']
-    
     for news in news_list:
         title = news['Title'].lower()
         if any(w in title for w in pos_keywords): score += 1
         if any(w in title for w in neg_keywords): score -= 1
-            
     if score > 1: return "POZİTİF (Haberler büyümeyi destekliyor)", "green"
     elif score < -1: return "NEGATİF (Risk ve düşüş vurgusu var)", "red"
     else: return "NÖTR / KARIŞIK (Dengeli haber akışı)", "blue"
 
 # --- ANALİZ MOTORU 2: DEDEKTİF (SKEPTIC ANALYSIS) ---
+# Rate Limit yememek için cache ekledik
+@st.cache_data(ttl=3600) 
 def generate_skeptic_analysis(ticker):
-    """
-    Rakamların ardındaki 'neden' sorusunu sorar.
-    Ciro düşerken kar artıyor mu? Fiyat düşerken nakit artıyor mu?
-    """
     analysis = []
+    # Rate Limit Koruması: Bekleme
+    time.sleep(1) 
     try:
         stock = yf.Ticker(ticker)
         inc = stock.income_stmt
-        bs = stock.balance_sheet
         hist = stock.history(period="1y")
         
-        # Veri Hazırlığı (Son 2 Yıl Karşılaştırması için)
         if not inc.empty and inc.shape[1] > 1:
             curr_rev = find_value_in_df(inc.iloc[:, 0], ['total', 'revenue'])
             prev_rev = find_value_in_df(inc.iloc[:, 1], ['total', 'revenue'])
-            
             curr_net = find_value_in_df(inc.iloc[:, 0], ['net', 'income'])
             prev_net = find_value_in_df(inc.iloc[:, 1], ['net', 'income'])
             
-            curr_opex = find_value_in_df(inc.iloc[:, 0], ['operating', 'expense'])
-            prev_opex = find_value_in_df(inc.iloc[:, 1], ['operating', 'expense'])
-            
-            # SENARYO 1: "KÜÇÜLEREK KÂR ETME" (Cost Cutting)
             if curr_rev and prev_rev and curr_rev < prev_rev:
                 if curr_net and prev_net and curr_net > prev_net:
-                    analysis.append("✂️ **Kemer Sıkma Operasyonu:** Şirketin cirosu geçen yıla göre DÜŞMÜŞ, buna rağmen Net Kârı ARTMIŞ. Bu durum, şirketin büyüyerek değil, masrafları kısarak (işçi çıkarma, operasyon kapatma vb.) kâr ettiğini gösterir. Bu tip kâr artışları sürdürülebilir olmayabilir.")
+                    analysis.append("✂️ **Kemer Sıkma Operasyonu:** Şirketin cirosu düşmüş ama net kârı artmış. Büyüyerek değil, küçülerek (masraf kısarak) kâr ediyor.")
             
-            # SENARYO 2: "AGRESİF BÜYÜME BEDELİ" (Growth at all costs)
-            if curr_rev and prev_rev and curr_rev > (prev_rev * 1.20): # %20+ Büyüme
+            if curr_rev and prev_rev and curr_rev > (prev_rev * 1.20):
                 if curr_net and curr_net < 0:
-                    analysis.append("🚀 **Büyüme Sancısı:** Ciro hızla artıyor (%20+) ancak şirket hala ZARAR ediyor. Yönetim pazar payı kapmak için kârlılığı feda ediyor. Nakit durumu (FCF) kontrol edilmeli, yoksa bedelli sermaye artırımı riski doğabilir.")
+                    analysis.append("🚀 **Büyüme Sancısı:** Ciro hızla artıyor (%20+) ancak şirket hala zarar ediyor. Pazar payı için kârlılık feda ediliyor.")
 
-        # SENARYO 3: "DEĞER Mİ TUZAK MI?" (Value Trap)
         pe = stock.info.get('trailingPE')
         if pe and pe < 10:
             if not inc.empty and curr_rev and prev_rev and curr_rev < prev_rev:
-                analysis.append("⚠️ **Değer Tuzağı Riski:** F/K oranı çok düşük (<10) görünüyor ancak şirketin cirosu düşüş trendinde. Piyasa, şirketin gelecekte daha da küçüleceğini fiyatlıyor olabilir. Sadece 'ucuz' diye almak risklidir.")
+                analysis.append("⚠️ **Değer Tuzağı Riski:** F/K çok düşük ama ciro düşüyor. Piyasa küçülmeyi fiyatlıyor olabilir.")
 
-        # SENARYO 4: "PİYASA KÖRLÜĞÜ" (Contrarian Opportunity)
-        # Fiyat %50 düşmüş ama FCF Pozitif
         if not hist.empty:
             start_p = hist['Close'].iloc[0]
             end_p = hist['Close'].iloc[-1]
             drop_pct = ((end_p - start_p) / start_p) * 100
-            
             fcf = stock.info.get('freeCashflow')
             if drop_pct < -40 and fcf and fcf > 0:
-                analysis.append("💎 **Gizli Fırsat Olabilir:** Hisse fiyatı son 1 yılda sert düşmüş (%40+) ANCAK şirket hala NAKİT ÜRETİYOR (Pozitif FCF). Piyasa aşırı tepki vermiş olabilir. Kasa sağlamsa bu bir 'Dipten Dönüş' hikayesi olabilir.")
+                analysis.append("💎 **Gizli Fırsat Olabilir:** Fiyat sert düşmüş ama şirket hala nakit üretiyor (Pozitif FCF). Piyasa aşırı tepki vermiş olabilir.")
 
-    except Exception as e:
-        analysis.append(f"Detaylı analiz yapılamadı: {e}")
+    except Exception:
+        # Hata olursa boş liste dön, sistemi çökertme
+        return ["Veri alınırken zaman aşımı oluştu. Lütfen tekrar deneyin."]
         
     return analysis
 
-# --- VERİ ÇEKME MOTORLARI (Korundu) ---
+# --- ANALİZ MOTORU 3: SÖZEL FİNANSAL ANALİZ (Missing Function Restored) ---
+# Rate Limit koruması için cache
+@st.cache_data(ttl=3600)
+def generate_verbal_financial_analysis(ticker):
+    analysis = []
+    time.sleep(0.5) # Nezaket beklemesi
+    try:
+        stock = yf.Ticker(ticker)
+        inc = stock.income_stmt
+        bs = stock.balance_sheet
+        
+        if not inc.empty and not bs.empty:
+            curr_inc = inc.iloc[:, 0]
+            curr_bs = bs.iloc[:, 0]
+            
+            rev = find_value_in_df(curr_inc, ['total', 'revenue'])
+            gp = find_value_in_df(curr_inc, ['gross', 'profit'])
+            if rev and gp:
+                margin = (gp / rev) * 100
+                desc = "Çok Yüksek" if margin > 70 else ("Sağlıklı" if margin > 40 else "Düşük")
+                analysis.append(f"📊 **Gelir Yapısı:** Şirket **{format_currency(rev)}** ciro üzerinden **{format_currency(gp)}** brüt kâr elde etmiştir. Marj: **%{margin:.1f}** ({desc}).")
+            
+            net = find_value_in_df(curr_inc, ['net', 'income'])
+            if net:
+                if net > 0: analysis.append(f"💰 **Net Kârlılık:** Şirket **{format_currency(net)}** net kâr açıklamıştır (Pozitif).")
+                else: analysis.append(f"⚠️ **Kârlılık:** Şirket **{format_currency(net)}** zarar açıklamıştır.")
+            
+            op_inc = find_value_in_df(curr_inc, ['operating', 'income']) or find_value_in_df(curr_inc, ['operating', 'profit'])
+            if op_inc:
+                 analysis.append(f"⚙️ **Operasyonel Güç:** Esas faaliyet kârı **{format_currency(op_inc)}** seviyesindedir.")
+
+            cash = find_value_in_df(curr_bs, ['cash']) or 0
+            debt = find_value_in_df(curr_bs, ['total', 'debt']) or find_value_in_df(curr_bs, ['long', 'debt']) or 0
+            analysis.append(f"🛡️ **Bilanço:** Nakit: **{format_currency(cash)}** | Borç: **{format_currency(debt)}**.")
+            
+            if cash > debt: analysis.append(f"✅ **Nakit Zengini:** Nakitler borçları karşılıyor (**{format_currency(cash-debt)}** Net Nakit).")
+            else: analysis.append(f"⚡ **Borçluluk:** Borçlar nakitten fazla.")
+        else:
+            analysis.append("Finansal veriler eksik.")
+    except Exception:
+        return ["Veri çekilemedi (Rate Limit)."]
+        
+    return analysis
+
+# --- FİNVİZ HABER ---
+@st.cache_data(ttl=1800)
 def get_finviz_news_profile(ticker):
     url = f"https://finviz.com/quote.ashx?t={ticker}"
     headers = {'User-Agent': 'Mozilla/5.0'}
@@ -166,9 +188,7 @@ def get_finviz_news_profile(ticker):
         profile_td = soup.find("td", class_="fullview-profile")
         if profile_td: 
             raw_profile = profile_td.get_text(strip=True)
-            # ÇEVİRİ BURADA YAPILIYOR
             data["Profile"] = translate_to_turkish(raw_profile)
-            
         news_table = soup.find("table", id="news-table")
         if news_table:
             rows = news_table.find_all("tr")
@@ -182,6 +202,7 @@ def get_finviz_news_profile(ticker):
     except: pass
     return data
 
+# --- METRİKLER VE TEKNİK ---
 def fetch_robust_metrics(ticker):
     metrics = {'EV/EBITDA': None, 'FCF': None, 'Source': '-'}
     try:
@@ -260,8 +281,8 @@ def generate_holistic_report(ticker, finviz_row, metrics, hist):
     st.info(f"**Gerekçe:** {reason}")
     st.markdown("---")
 
-def get_finviz_v36(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
-    # Standart Finviz URL Oluşturma (v33/34/35 ile aynı)
+# --- FİNVİZ TARAYICI ---
+def get_finviz_v37(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
     filters = []
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
     sec_map = {"Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices", "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive", "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare", "Industrials": "sec_industrials", "Real Estate": "sec_realestate", "Technology": "sec_technology", "Utilities": "sec_utilities"}
@@ -313,7 +334,7 @@ def get_finviz_v36(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val)
 # --- UI AKIŞI ---
 if st.sidebar.button("Analizi Başlat"):
     with st.spinner("Piyasa taranıyor..."):
-        df, url = get_finviz_v36(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
+        df, url = get_finviz_v37(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
         st.session_state.scan_data = df
         st.session_state.url = url
 
@@ -398,19 +419,16 @@ if not st.session_state.scan_data.empty:
                         st.markdown(f"**{n['Date']}** | [{n['Title']}]({n['Link']})")
             
             with tab_verbal:
-                # DEDEKTİF ANALİZİ BURADA ÇAĞRILIYOR
-                st.subheader("🕵️ Dedektif Modu (Şeytanın Avukatı)")
+                # SÖZEL ANALİZ (Hata Vermeyen Versiyon)
+                st.subheader("🕵️ Dedektif Modu")
                 skeptic_comments = generate_skeptic_analysis(tik)
                 if skeptic_comments:
                     for s in skeptic_comments: st.warning(s)
-                else:
-                    st.success("✅ Verilerde bariz bir 'Değer Tuzağı' veya 'Kalitesiz Kâr' sinyali tespit edilmedi.")
+                else: st.success("Bariz bir olumsuzluk tespit edilmedi.")
                 
                 st.markdown("---")
-                st.subheader("💬 Sözel Finansal Analiz (Kanıtlı)")
-                # Mevcut Sözel Analiz Fonksiyonunu (generate_verbal_financial_analysis) buraya çağırabilirsiniz
-                # (Kodun geri kalanı v35 ile aynı kalacak şekilde yukarıdaki fonksiyonu kullanın)
-                # Not: Kod bütünlüğü için generate_verbal_financial_analysis fonksiyonu v35'teki haliyle kullanılmalıdır.
+                st.subheader("💬 Sözel Finansal Analiz")
+                # Eksik fonksiyonu artık çağırdığımızda hata vermeyecek
                 from_v35 = generate_verbal_financial_analysis(tik)
                 for s in from_v35: st.info(s)
 
