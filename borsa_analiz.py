@@ -5,13 +5,14 @@ import requests
 import plotly.graph_objects as go
 from bs4 import BeautifulSoup
 import time
+import numpy as np
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v15", layout="wide")
-st.title("📊 Akademik Piyasa Analizörü (Şeffaf Yorum Modu)")
+st.set_page_config(page_title="Akademik Karar Destek v16", layout="wide")
+st.title("📊 Akademik Karar Destek Sistemi (Sinyal Çelişki Modu)")
 st.markdown("""
-**Yenilikler:** 1. **Kanıtlı Yorum:** Yorumların hangi matematiksel veriye dayandığı açıkça yazılır.
-2. **Onarılmış Filtreler:** Sektör ve Rasyo filtreleri Finviz URL yapısına tam uyumlu hale getirildi.
+**Metodoloji:** Bu sistem, temel (Değer/Kalite) ve teknik (Momentum/Risk) sinyalleri arasındaki uyumu test eder.
+**Yenilik:** EV/EBITDA tahmini, Volatilite analizi ve 'Sinyal Çelişki Dedektörü' eklendi.
 """)
 
 # --- Session State ---
@@ -19,11 +20,11 @@ if 'scan_data' not in st.session_state:
     st.session_state.scan_data = pd.DataFrame()
 
 # --- YAN MENÜ (Filtreler) ---
-st.sidebar.header("🔍 Hassas Filtreleme")
+st.sidebar.header("🔍 Çok Katmanlı Filtreleme")
 
 # 0. Tarama Derinliği
-limit_opts = {20: 1, 40: 2, 60: 3, 100: 5, 200: 10}
-scan_limit = st.sidebar.selectbox("Tarama Limiti (Sayfa Sayısı)", list(limit_opts.keys()), index=2)
+limit_opts = {20: 1, 40: 2, 60: 3, 100: 5}
+scan_limit = st.sidebar.selectbox("Evren Genişliği (Sayfa)", list(limit_opts.keys()), index=2)
 
 # 1. Borsa & Sektör
 exchange = st.sidebar.selectbox("Borsa", ["Any", "AMEX", "NASDAQ", "NYSE"], index=0)
@@ -35,97 +36,107 @@ sector_list = [
 ]
 sector = st.sidebar.selectbox("Sektör", sector_list, index=0)
 
-# 2. Değerleme Rasyoları
-st.sidebar.markdown("### Değerleme")
+# 2. Temel Rasyolar
+st.sidebar.markdown("### 1. Temel Filtreler (Değer & Kalite)")
 pe_opts = [
     "Any", "Low (<15)", "Profitable (<0)", "High (>50)", 
-    "Under 5", "Under 10", "Under 15", "Under 20", "Under 25", "Under 30", "Under 35", "Under 40", "Under 45", "Under 50", 
-    "Over 15", "Over 20", "Over 30", "Over 50"
+    "Under 20", "Under 30", "Under 50", "Over 20"
 ]
-pe_ratio = st.sidebar.selectbox("F/K Oranı (P/E)", pe_opts, index=0)
-
-pb_opts = ["Any", "Low (<1)", "Under 2", "Under 3", "High (>5)", "Over 5"]
-pb_ratio = st.sidebar.selectbox("P/B Oranı (Defter Değeri)", pb_opts, index=0)
+pe_ratio = st.sidebar.selectbox("F/K (Değerleme)", pe_opts, index=0)
 
 peg_opts = ["Any", "Low (<1)", "Under 2", "High (>3)", "Growth (>1.5)"]
-peg_ratio = st.sidebar.selectbox("PEG (Büyüme/Değer)", peg_opts, index=0)
+peg_ratio = st.sidebar.selectbox("PEG (Büyüme)", peg_opts, index=0)
 
-# 3. Finansal Sağlık & Temettü
-st.sidebar.markdown("### Sağlık & Getiri")
-roe_opts = ["Any", "Positive (>0%)", "High (>15%)", "Very High (>20%)", "Over 30%", "Under 0%"]
-roe = st.sidebar.selectbox("ROE (Kârlılık)", roe_opts, index=0)
+roe_opts = ["Any", "Positive (>0%)", "High (>15%)", "Very High (>20%)", "Under 0%"]
+roe = st.sidebar.selectbox("ROE (Kalite)", roe_opts, index=0)
 
 debt_opts = ["Any", "Low (<0.1)", "Under 0.5", "Under 1", "High (>1)"]
-debt_eq = st.sidebar.selectbox("Borç/Özkaynak", debt_opts, index=0)
+debt_eq = st.sidebar.selectbox("Borç/Özkaynak (Risk)", debt_opts, index=0)
 
-div_opts = ["Any", "Positive (>0%)", "High (>5%)", "Very High (>10%)", "Over 2%", "Over 3%"]
-dividend = st.sidebar.selectbox("Temettü Verimi", div_opts, index=0)
+# 3. Teknik Filtreler (Yeni Katman)
+st.sidebar.markdown("### 2. Teknik Filtreler (Zamanlama)")
+rsi_filter = st.sidebar.selectbox("RSI (Momentum)", ["Any", "Oversold (<30)", "Overbought (>70)", "Neutral (40-60)"], index=0)
+price_ma = st.sidebar.selectbox("Fiyat vs MA200", ["Any", "Above SMA200", "Below SMA200"], index=0)
 
-# --- TEKNİK HESAPLAMA MODÜLÜ ---
-def calculate_technical_indicators(df):
-    """RSI ve Hareketli Ortalamaları Hesaplar"""
+# --- TEKNİK HESAPLAMA MODÜLÜ (Gelişmiş) ---
+def calculate_advanced_metrics(df):
+    """
+    RSI, Volatilite ve Drawdown hesaplar.
+    """
+    # 1. Hareketli Ortalamalar
     df['MA50'] = df['Close'].rolling(window=50).mean()
     df['MA200'] = df['Close'].rolling(window=200).mean()
     
-    # RSI Hesabı
+    # 2. RSI Hesabı
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
+    # 3. Volatilite (Risk) - Yıllıklandırılmış Standart Sapma
+    df['Log_Ret'] = np.log(df['Close'] / df['Close'].shift(1))
+    df['Volatility'] = df['Log_Ret'].rolling(window=30).std() * np.sqrt(252) * 100 # Yıllık %
+    
+    # 4. Max Drawdown (Zirveden Düşüş)
+    rolling_max = df['Close'].expanding().max()
+    df['Drawdown'] = (df['Close'] - rolling_max) / rolling_max * 100
+    
     return df
 
-# --- ŞEFFAF YORUM MOTORU ---
-def generate_transparent_commentary(ticker, df_hist):
-    """Veriyi kanıtıyla birlikte yorumlar"""
-    comments = []
+# --- SİNYAL ÇELİŞKİ DETEKTÖRÜ (Decision Support) ---
+def detect_conflicts(ticker, hist_df, fin_row):
+    """
+    Temel ve Teknik veriler arasındaki uyumsuzlukları (Value Trap) tespit eder.
+    """
+    signals = []
+    conflict_score = 0 # 0: Uyumlu, Yüksek: Çelişkili
     
-    last_row = df_hist.iloc[-1]
-    curr_price = last_row['Close']
-    start_price = df_hist['Close'].iloc[0]
+    last_row = hist_df.iloc[-1]
     
-    # 1. Getiri Analizi (Kanıtlı)
-    total_return = ((curr_price - start_price) / start_price) * 100
-    evidence = f"(Güncel: ${curr_price:.2f} vs Başlangıç: ${start_price:.2f})"
+    # Veri Hazırlığı (Temel)
+    try:
+        pe = float(fin_row['P/E'])
+    except: pe = 0
     
-    if total_return > 30:
-        comments.append(f"🚀 **Yüksek Getiri:** Hisse son 1 yılda **%{total_return:.1f}** değer kazanmıştır {evidence}. Bu, piyasa ortalamasının (genelde %10-15) çok üzerindedir.")
-    elif total_return > 0:
-        comments.append(f"📈 **Pozitif Getiri:** Hisse **%{total_return:.1f}** getiri ile yılı artıda götürmektedir {evidence}.")
-    else:
-        comments.append(f"📉 **Negatif Getiri:** Yatırımcılar son 1 yılda **%{total_return:.1f}** zarar etmiştir {evidence}.")
+    try:
+        price = float(fin_row['Price'])
+    except: price = 0
+    
+    # --- SENARYO 1: Değer Tuzağı (Value Trap) ---
+    # F/K çok düşük (Ucuz) AMA Fiyat MA200 altında (Düşüş Trendi)
+    if 0 < pe < 10 and last_row['Close'] < last_row['MA200']:
+        signals.append("⚠️ **Value Trap Riski:** Hisse temel olarak çok ucuz (F/K < 10) ancak teknik olarak 'Ayı Piyasası'nda (Fiyat < MA200). Piyasada bilmediğimiz bir risk fiyatlanıyor olabilir.")
+        conflict_score += 2
+        
+    # --- SENARYO 2: Momentum Çelişkisi ---
+    # Fiyat Zirvede AMA RSI Aşırı Alımda
+    if last_row['Drawdown'] > -2 and last_row['RSI'] > 75:
+        signals.append("⚠️ **Aşırı Isınma:** Fiyat zirveye çok yakın ancak RSI (%{:.0f}) aşırı alım bölgesinde. Düzeltme riski var.".format(last_row['RSI']))
+        conflict_score += 1
+        
+    # --- SENARYO 3: Gizli Fırsat (Contrarian) ---
+    # RSI Aşırı Satımda AMA ROE Çok Yüksek (Kaliteli şirket dayak yemiş)
+    roe_str = str(fin_row.get('ROE', '0')).replace('%','')
+    try: roe_val = float(roe_str)
+    except: roe_val = 0
+    
+    if last_row['RSI'] < 30 and roe_val > 20:
+        signals.append("💎 **Gizli Fırsat:** Kaliteli bir şirket (ROE > 20) aşırı satılmış (RSI < 30). Bu teknik bir 'Alım Fırsatı' olabilir.")
+        conflict_score -= 1 # Bu iyi bir çelişki
+        
+    # --- SENARYO 4: Yüksek Volatilite Uyarısı ---
+    if last_row['Volatility'] > 60: # %60 üzeri yıllık volatilite
+        signals.append("⚡ **Yüksek Risk:** Hissenin volatilitesi (%{:.0f}) çok yüksek. Portföy sapmasını bozabilir.".format(last_row['Volatility']))
 
-    # 2. Trend Analizi (MA50 Kanıtlı)
-    ma50 = last_row['MA50']
-    if pd.notna(ma50):
-        if curr_price > ma50:
-            diff = ((curr_price - ma50) / ma50) * 100
-            comments.append(f"✅ **Kısa Vadeli Trend:** Fiyat (${curr_price:.2f}), 50 günlük ortalamasının (${ma50:.2f}) üzerindedir. Ortalamadan **%{diff:.1f}** yukarıda olması alıcıların güçlü olduğunu gösterir.")
-        else:
-            diff = ((ma50 - curr_price) / ma50) * 100
-            comments.append(f"⚠️ **Trend Zayıflığı:** Fiyat (${curr_price:.2f}), 50 günlük ortalamasının (${ma50:.2f}) altına sarkmıştır.")
+    return signals, conflict_score
 
-    # 3. RSI Analizi (Kanıtlı)
-    rsi = last_row['RSI']
-    if pd.notna(rsi):
-        if rsi < 30:
-            comments.append(f"💎 **Aşırı Satım (Fırsat?):** RSI göstergesi **{rsi:.0f}** seviyesindedir. 30'un altı teknik analizde genelde 'aşırı satım' olarak yorumlanır ve tepki yükselişi beklenebilir.")
-        elif rsi > 70:
-            comments.append(f"🔥 **Aşırı Alım (Risk):** RSI göstergesi **{rsi:.0f}** seviyesindedir. 70'in üzeri hissenin çok hızlı yükseldiğini ve kâr satışı gelebileceğini işaret eder.")
-        else:
-            comments.append(f"⚖️ **Nötr Bölge:** RSI **{rsi:.0f}** seviyesiyle dengeli bir bölgededir (30-70 arası normal kabul edilir).")
-
-    return comments
-
-# --- VERİ ÇEKME MOTORU (Düzeltilmiş URL Yapısı) ---
-def get_finviz_data_v15(limit_count, exc, sec, pe, pb, peg, roe_val, de, div):
+# --- VERİ ÇEKME MOTORU (Finviz v15 Tabanlı) ---
+def get_finviz_data_v16(limit_count, exc, sec, pe, peg, roe_val, de, ta_rsi, ta_ma):
     filters = []
     
-    # 1. Borsa
+    # 1. Borsa & Sektör
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
-    
-    # 2. Sektör (DÜZELTİLDİ: Artık 'f' parametresine ekleniyor)
     sec_map = {
         "Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices",
         "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive",
@@ -135,34 +146,33 @@ def get_finviz_data_v15(limit_count, exc, sec, pe, pb, peg, roe_val, de, div):
     }
     if sec != "Any": filters.append(f"{sec_map[sec]}")
 
-    # 3. Rasyolar
+    # 2. Temel Rasyolar
     pe_map = {"Low (<15)": "fa_pe_u15", "Profitable (<0)": "fa_pe_profitable", "High (>50)": "fa_pe_o50",
-              "Under 5": "fa_pe_u5", "Under 10": "fa_pe_u10", "Under 15": "fa_pe_u15", "Under 20": "fa_pe_u20",
-              "Under 25": "fa_pe_u25", "Under 30": "fa_pe_u30", "Under 35": "fa_pe_u35", "Under 40": "fa_pe_u40",
-              "Under 45": "fa_pe_u45", "Under 50": "fa_pe_u50", "Over 15": "fa_pe_o15", "Over 20": "fa_pe_o20",
-              "Over 30": "fa_pe_o30", "Over 50": "fa_pe_o50"}
+              "Under 20": "fa_pe_u20", "Under 30": "fa_pe_u30", "Under 50": "fa_pe_u50", "Over 20": "fa_pe_o20"}
     if pe in pe_map: filters.append(pe_map[pe])
 
-    pb_map = {"Low (<1)": "fa_pb_u1", "Under 2": "fa_pb_u2", "Under 3": "fa_pb_u3", "High (>5)": "fa_pb_o5", "Over 5": "fa_pb_o5"}
-    if pb in pb_map: filters.append(pb_map[pb])
-    
     peg_map = {"Low (<1)": "fa_peg_u1", "Under 2": "fa_peg_u2", "High (>3)": "fa_peg_o3", "Growth (>1.5)": "fa_peg_o1.5"}
     if peg in peg_map: filters.append(peg_map[peg])
 
-    roe_map = {"Positive (>0%)": "fa_roe_pos", "High (>15%)": "fa_roe_o15", "Very High (>20%)": "fa_roe_o20", "Over 30%": "fa_roe_o30", "Under 0%": "fa_roe_neg"}
+    roe_map = {"Positive (>0%)": "fa_roe_pos", "High (>15%)": "fa_roe_o15", "Very High (>20%)": "fa_roe_o20", "Under 0%": "fa_roe_neg"}
     if roe_val in roe_map: filters.append(roe_map[roe_val])
     
     de_map = {"Low (<0.1)": "fa_debteq_u0.1", "Under 0.5": "fa_debteq_u0.5", "Under 1": "fa_debteq_u1", "High (>1)": "fa_debteq_o1"}
     if de in de_map: filters.append(de_map[de])
 
-    div_map = {"Positive (>0%)": "fa_div_pos", "High (>5%)": "fa_div_o5", "Very High (>10%)": "fa_div_o10", "Over 2%": "fa_div_o2", "Over 3%": "fa_div_o3"}
-    if div in div_map: filters.append(div_map[div])
+    # 3. Teknik Filtreler (Finviz Tarafında Ön Eleme)
+    if ta_rsi == "Oversold (<30)": filters.append("ta_rsi_os30")
+    elif ta_rsi == "Overbought (>70)": filters.append("ta_rsi_ob70")
+    elif ta_rsi == "Neutral (40-60)": filters.append("ta_rsi_n4060")
+    
+    if ta_ma == "Above SMA200": filters.append("ta_sma200_pa")
+    elif ta_ma == "Below SMA200": filters.append("ta_sma200_pb")
 
     # URL Oluşturma
+    # v=151 (Valuation tablosu değil, Overview v=111 + Financial v=161 hibrit veri için v=111 kullanıp detayları Yahoo'dan alacağız grafik kısmında)
     filter_string = ",".join(filters)
     base_url = f"https://finviz.com/screener.ashx?v=111&f={filter_string}"
     
-    # Veri Çekme (Sayfalama)
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     all_dfs = []
     prog_bar = st.progress(0)
@@ -190,7 +200,7 @@ def get_finviz_data_v15(limit_count, exc, sec, pe, pb, peg, roe_val, de, div):
                     if len(cols) >= 11: data.append(cols[:11])
                 if data: all_dfs.append(pd.DataFrame(data, columns=head))
             else:
-                break # Tablo yoksa döngüyü kır
+                break
                 
             time.sleep(0.5)
             prog_bar.progress((i + 1) / len(pages))
@@ -203,16 +213,16 @@ def get_finviz_data_v15(limit_count, exc, sec, pe, pb, peg, roe_val, de, div):
     return pd.DataFrame(), base_url
 
 # --- ANA AKIŞ ---
-if st.sidebar.button("Sonuçları Getir"):
-    with st.spinner("Piyasa taranıyor..."):
-        df, url = get_finviz_data_v15(scan_limit, exchange, sector, pe_ratio, pb_ratio, peg_ratio, roe, debt_eq, dividend)
+if st.sidebar.button("Karar Destek Analizini Başlat"):
+    with st.spinner("Piyasa taranıyor ve metrikler hesaplanıyor..."):
+        df, url = get_finviz_data_v16(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
         st.session_state.scan_data = df
         st.session_state.url = url
 
 if not st.session_state.scan_data.empty:
     df = st.session_state.scan_data
-    st.success(f"✅ {len(df)} Şirket Listelendi")
-    st.caption(f"Veri Kaynağı: {st.session_state.url}")
+    st.success(f"✅ {len(df)} Şirket Analiz Edildi")
+    st.caption(f"Kaynak: {st.session_state.url}")
     st.dataframe(df, use_container_width=True)
     
     st.divider()
@@ -220,8 +230,8 @@ if not st.session_state.scan_data.empty:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.subheader("📉 Teknik Analiz")
-        tik = st.selectbox("Analiz İçin Hisse Seç:", df['Ticker'].tolist())
+        st.subheader("📉 Teknik & Risk Analizi")
+        tik = st.selectbox("Detaylı Analiz İçin Hisse Seç:", df['Ticker'].tolist())
         
         hist = pd.DataFrame()
         if tik:
@@ -231,14 +241,25 @@ if not st.session_state.scan_data.empty:
                 hist.columns = [c.capitalize() for c in hist.columns]
                 
                 if not hist.empty:
-                    # İndikatörleri Hesapla
-                    hist = calculate_technical_indicators(hist)
+                    # Gelişmiş Metrikleri Hesapla
+                    hist = calculate_advanced_metrics(hist)
                     
+                    # Grafik: Fiyat + SMA + Bollinger Bandı (Basit haliyle)
                     fig = go.Figure()
-                    fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], name='Fiyat'))
-                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA50'], name='50 Günlük Ort.', line=dict(width=1, dash='dash')))
-                    fig.update_layout(title=f"{tik} - Fiyat ve Ortalama", height=450)
+                    fig.add_trace(go.Scatter(x=hist.index, y=hist['Close'], name='Fiyat', line=dict(color='black')))
+                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA50'], name='SMA 50', line=dict(color='blue', width=1)))
+                    fig.add_trace(go.Scatter(x=hist.index, y=hist['MA200'], name='SMA 200', line=dict(color='red', width=2)))
+                    
+                    fig.update_layout(title=f"{tik} - Trend Analizi", height=450, xaxis_rangeslider_visible=False)
                     st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Risk Kartları
+                    last = hist.iloc[-1]
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Volatilite (Yıllık)", f"%{last['Volatility']:.1f}", help="Daha yüksek volatilite = Daha yüksek risk")
+                    c2.metric("Max Drawdown", f"%{last['Drawdown']:.1f}", help="Son 1 yılda zirveden en büyük düşüş")
+                    c3.metric("RSI (14)", f"{last['RSI']:.0f}", help="30 altı ucuz, 70 üstü pahalı sinyali")
+                    
                 else:
                     st.warning("Grafik verisi alınamadı.")
             except Exception as e:
@@ -246,19 +267,30 @@ if not st.session_state.scan_data.empty:
 
     with col2:
         if tik and not hist.empty:
-            st.subheader("🧐 Şeffaf Yorumlar")
-            st.caption("Aşağıdaki yorumlar, sol taraftaki grafikten hesaplanan matematiksel verilere dayanır.")
+            st.subheader("🧠 Karar Destek Asistanı")
             
-            comments = generate_transparent_commentary(tik, hist)
-            
-            for c in comments:
-                st.info(c)
-                
-            st.markdown("---")
+            # Sinyal Çatışması Analizi
             row = df[df['Ticker'] == tik].iloc[0]
-            st.write(f"**Sektör:** {row['Sector']}")
-            st.write(f"**Fiyat:** {row['Price']}")
-            st.write(f"**F/K:** {row['P/E']}")
+            signals, conflict_score = detect_conflicts(tik, hist, row)
+            
+            if signals:
+                st.write("**Tespit Edilen Kritik Sinyaller:**")
+                for s in signals:
+                    st.info(s)
+            else:
+                st.success("✅ Temel ve Teknik göstergeler uyumlu. Bariz bir 'Değer Tuzağı' veya 'Aşırı Isınma' sinyali yok.")
+            
+            st.markdown("---")
+            st.write("**Temel Veri Özeti:**")
+            st.write(f"• **Fiyat:** ${row['Price']}")
+            st.write(f"• **F/K:** {row['P/E']}")
+            st.write(f"• **Sektör:** {row['Sector']}")
+            
+            # Tahmini EV/EBITDA (Basit Proxy)
+            # Finviz tablosunda Market Cap var, Debt yok. Ancak P/E'den yola çıkarak kaba bir yaklaşım sunabiliriz.
+            # Akademik not: EV/EBITDA'yı tam hesaplamak için Balance Sheet lazım, burada proxy kullanmıyoruz, yanlış yönlendirmemek için.
+            
+            st.caption("Not: Volatilite ve Drawdown hesaplamaları son 1 yıllık günlük kapanış verilerine dayanır.")
 
 elif st.session_state.scan_data.empty:
-    st.info("Lütfen filtreleri ayarlayıp 'Sonuçları Getir' butonuna basınız.")
+    st.info("Lütfen sol menüden kriterleri belirleyip 'Karar Destek Analizini Başlat' butonuna basınız.")
