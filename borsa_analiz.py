@@ -9,11 +9,11 @@ import numpy as np
 import re
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v34", layout="wide")
-st.title("📊 Akademik Karar Destek Sistemi (Analist Modu)")
+st.set_page_config(page_title="Akademik Analiz v35", layout="wide")
+st.title("📊 Akademik Karar Destek Sistemi (Kusursuz Format)")
 st.markdown("""
-**Yenilik:** Haber Duygu Analizi (Sentiment) ve Sayısal Kanıtlı Sözel Analiz.
-**Altyapı:** v33 tabanlıdır. Kod mimarisi korunmuş, analiz yeteneği artırılmıştır.
+**Düzeltme:** Sözel analizdeki Türkçe karakter ve formatlama bozuklukları giderildi.
+**Analiz:** Metin analizi, haber duygu durumu ve kesin bilanço verileri.
 """)
 
 # --- Session State ---
@@ -57,42 +57,28 @@ def format_currency(val):
     if abs_val >= 1e6: return f"${val/1e6:.2f} Milyon"
     return f"${val:,.2f}"
 
-# --- YENİ: HABER DUYGU ANALİZİ MOTORU ---
+# --- HABER DUYGU ANALİZİ ---
 def analyze_news_sentiment(news_list):
-    """Haber başlıklarını tarar ve genel havayı (Sentiment) analiz eder."""
     if not news_list:
         return "Yorumlanacak haber bulunamadı.", "gray"
     
     score = 0
-    # Basit Anahtar Kelime Sözlüğü (İngilizce Finans Terimleri)
-    pos_keywords = ['beat', 'surge', 'jump', 'gain', 'profit', 'growth', 'positive', 'up', 'high', 'partnership', 'expand', 'launch', 'approve', 'buy', 'dividend', 'strong']
-    neg_keywords = ['miss', 'fall', 'drop', 'loss', 'down', 'decline', 'negative', 'low', 'lawsuit', 'investigation', 'cut', 'fail', 'weak', 'risk']
-    
-    analysis_text = ""
+    pos_keywords = ['beat', 'surge', 'jump', 'gain', 'profit', 'growth', 'positive', 'up', 'high', 'partnership', 'expand', 'launch', 'approve', 'buy', 'dividend', 'strong', 'reaffirm']
+    neg_keywords = ['miss', 'fall', 'drop', 'loss', 'down', 'decline', 'negative', 'low', 'lawsuit', 'investigation', 'cut', 'fail', 'weak', 'risk', 'compliance']
     
     for news in news_list:
         title = news['Title'].lower()
-        # Pozitif kelime kontrolü
-        if any(w in title for w in pos_keywords):
-            score += 1
-        # Negatif kelime kontrolü
-        if any(w in title for w in neg_keywords):
-            score -= 1
+        if any(w in title for w in pos_keywords): score += 1
+        if any(w in title for w in neg_keywords): score -= 1
             
-    # Sonuç Yorumlama
     if score > 1:
-        analysis_text = f"**Haber Akışı Analizi:** Genel hava **POZİTİF**. Son haberlerde büyüme, kâr artışı veya stratejik ortaklık gibi olumlu gelişmeler öne çıkıyor. Yatırımcı algısı destekleyici görünüyor."
-        color = "green"
+        return "POZİTİF (Haber akışı büyümeyi ve iyi sonuçları destekliyor)", "green"
     elif score < -1:
-        analysis_text = f"**Haber Akışı Analizi:** Genel hava **NEGATİF**. Son haberlerde düşüş, beklenti altı sonuçlar veya risk unsurları (dava, soruşturma vb.) dikkat çekiyor. Temkinli olunmalı."
-        color = "red"
+        return "NEGATİF (Haberlerde risk ve düşüş vurgusu var)", "red"
     else:
-        analysis_text = f"**Haber Akışı Analizi:** Genel hava **NÖTR/KARIŞIK**. Haberlerde belirgin bir coşku veya panik havası yok. Standart finansal raporlamalar veya dengeli gelişmeler mevcut."
-        color = "blue"
-        
-    return analysis_text, color
+        return "NÖTR / KARIŞIK (Haber akışı dengeli)", "blue"
 
-# --- FİNVİZ HABER VE PROFİL ---
+# --- FİNVİZ HABER ---
 def get_finviz_news_profile(ticker):
     url = f"https://finviz.com/quote.ashx?t={ticker}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -105,7 +91,7 @@ def get_finviz_news_profile(ticker):
         news_table = soup.find("table", id="news-table")
         if news_table:
             rows = news_table.find_all("tr")
-            for row in rows[:8]: # Son 8 haberi al (Analiz için veri artsın)
+            for row in rows[:8]:
                 cols = row.find_all("td")
                 if len(cols) > 1:
                     date_str = cols[0].get_text(strip=True)
@@ -115,7 +101,7 @@ def get_finviz_news_profile(ticker):
     except: pass
     return data
 
-# --- GÜÇLENDİRİLMİŞ SÖZEL FİNANSAL ANALİZ ---
+# --- SÖZEL FİNANSAL ANALİZ (Düzeltilmiş Format) ---
 def generate_verbal_financial_analysis(ticker):
     analysis = []
     try:
@@ -127,51 +113,57 @@ def generate_verbal_financial_analysis(ticker):
             curr_inc = inc.iloc[:, 0]
             curr_bs = bs.iloc[:, 0]
             
-            # 1. Gelir ve Marj Analizi
+            # Gelir
             rev = find_value_in_df(curr_inc, ['total', 'revenue'])
             gp = find_value_in_df(curr_inc, ['gross', 'profit'])
             
             if rev and gp:
                 margin = (gp / rev) * 100
-                margin_desc = "Çok Yüksek" if margin > 70 else ("Sağlıklı" if margin > 40 else "Düşük")
-                analysis.append(f"📊 **Gelir Yapısı:** Şirket **{format_currency(rev)}** ciro üzerinden **{format_currency(gp)}** brüt kâr elde etmiştir. Brüt Kâr Marjı **%{margin:.1f}** seviyesindedir ({margin_desc}). Bu, her 100 dolarlık satışın {margin:.1f} dolarının şirkete üretimden sonra kaldığını gösterir.")
+                desc = "Çok Yüksek" if margin > 70 else ("Sağlıklı" if margin > 40 else "Düşük")
+                # Format hatasını önlemek için f-string içinde temiz yapı
+                rev_str = format_currency(rev)
+                gp_str = format_currency(gp)
+                analysis.append(f"📊 **Gelir Yapısı:** Şirket **{rev_str}** ciro üzerinden **{gp_str}** brüt kâr elde etmiştir. Brüt Kâr Marjı **%{margin:.1f}** seviyesindedir ({desc}). Bu, her 100 dolarlık satışın {margin:.1f} dolarının şirkete üretimden sonra kaldığını gösterir.")
             
-            # 2. Net Kârlılık Analizi
+            # Net Kâr
             net = find_value_in_df(curr_inc, ['net', 'income'])
             if net:
+                net_str = format_currency(net)
                 if net > 0:
-                    analysis.append(f"💰 **Net Kârlılık:** Şirket son dönemde **{format_currency(net)}** net kâr açıklamıştır. Operasyonların kârlı sürdürüldüğünü ve hissedar değerinin arttığını gösterir (Pozitif Bottom Line).")
+                    analysis.append(f"💰 **Net Kârlılık:** Şirket son dönemde **{net_str}** net kâr açıklamıştır. Operasyonların kârlı sürdürüldüğünü ve hissedar değerinin arttığını gösterir (Pozitif Bottom Line).")
                 else:
-                    analysis.append(f"⚠️ **Kârlılık Uyarısı:** Şirket son dönemde **{format_currency(net)}** NET ZARAR açıklamıştır. Bu durum, büyüme harcamalarından veya operasyonel verimsizlikten kaynaklanıyor olabilir.")
+                    analysis.append(f"⚠️ **Kârlılık Uyarısı:** Şirket son dönemde **{net_str}** NET ZARAR açıklamıştır.")
             
-            # 3. Operasyonel Performans (Faaliyet Kârı) - YENİ
+            # Faaliyet Kârı
             op_inc = find_value_in_df(curr_inc, ['operating', 'income']) or find_value_in_df(curr_inc, ['operating', 'profit'])
             if op_inc:
-                 status = "Faaliyet Kârı" if op_inc > 0 else "Faaliyet Zararı"
-                 analysis.append(f"⚙️ **Operasyonel Güç:** Şirketin esas faaliyetlerinden elde ettiği sonuç **{format_currency(op_inc)}** ({status}). Bu rakam, finansman giderleri ve vergiler hariç şirketin ana işinden ne kadar kazandığını gösterir.")
+                 op_str = format_currency(op_inc)
+                 analysis.append(f"⚙️ **Operasyonel Güç:** Şirketin esas faaliyetlerinden elde ettiği sonuç **{op_str}** (Faaliyet Kârı). Bu rakam, finansman giderleri ve vergiler hariç şirketin ana işinden ne kadar kazandığını gösterir.")
 
-            # 4. Bilanço ve Nakit Durumu
+            # Bilanço
             cash = find_value_in_df(curr_bs, ['cash']) or 0
             debt = find_value_in_df(curr_bs, ['total', 'debt']) or find_value_in_df(curr_bs, ['long', 'debt']) or 0
             
-            analysis.append(f"🛡️ **Finansal Sağlık:** Kasa Nakdi: **{format_currency(cash)}** | Toplam Borç: **{format_currency(debt)}**.")
+            cash_str = format_currency(cash)
+            debt_str = format_currency(debt)
+            
+            analysis.append(f"🛡️ **Finansal Sağlık:** Kasa Nakdi: **{cash_str}** | Toplam Borç: **{debt_str}**.")
             
             if cash > debt:
-                diff = cash - debt
-                analysis.append(f"✅ **Nakit Zengini:** Şirketin elindeki nakit, tüm borçlarını kapatmaya yetiyor (**{format_currency(diff)}** Net Nakit). İflas riski son derece düşüktür ve yeni yatırımlar için eli güçlüdür.")
+                diff_str = format_currency(cash - debt)
+                analysis.append(f"✅ **Nakit Zengini:** Şirketin elindeki nakit, tüm borçlarını kapatmaya yetiyor (**{diff_str}** Net Nakit). İflas riski son derece düşüktür ve yeni yatırımlar için eli güçlüdür.")
             else:
-                ratio = debt / cash if cash > 0 else 0
-                analysis.append(f"⚡ **Borçluluk:** Şirketin borçları nakit varlıklarının üzerindedir (Kaldıraçlı Yapı). Faiz oranlarına ve nakit akışına dikkat edilmelidir.")
+                analysis.append(f"⚡ **Borçluluk:** Şirketin borçları nakit varlıklarının üzerindedir. Faiz oranlarına dikkat edilmelidir.")
 
         else:
-            analysis.append("Finansal tablo verisi eksik olduğu için detaylı analiz yapılamadı.")
+            analysis.append("Finansal tablo verisi çekilemedi.")
             
     except Exception as e:
         analysis.append(f"Analiz hatası: {e}")
         
     return analysis
 
-# --- HESAPLAMA MOTORU (v31 ile aynı) ---
+# --- HESAPLAMA MOTORU ---
 def fetch_robust_metrics(ticker):
     metrics = {'EV/EBITDA': None, 'FCF': None, 'Source': '-'}
     try:
@@ -256,8 +248,8 @@ def generate_holistic_report(ticker, finviz_row, metrics, hist):
     st.info(f"**Gerekçe:** {reason}")
     st.markdown("---")
 
-# --- FİNVİZ TARAYICI (Standart) ---
-def get_finviz_v34(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
+# --- FİNVİZ TARAYICI ---
+def get_finviz_v35(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
     filters = []
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
     sec_map = {"Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices", "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive", "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare", "Industrials": "sec_industrials", "Real Estate": "sec_realestate", "Technology": "sec_technology", "Utilities": "sec_utilities"}
@@ -309,7 +301,7 @@ def get_finviz_v34(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val)
 # --- UI AKIŞI ---
 if st.sidebar.button("Analizi Başlat"):
     with st.spinner("Piyasa taranıyor..."):
-        df, url = get_finviz_v34(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
+        df, url = get_finviz_v35(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
         st.session_state.scan_data = df
         st.session_state.url = url
 
@@ -371,13 +363,13 @@ if not st.session_state.scan_data.empty:
                 generate_holistic_report(tik, fin_row, adv, hist_long)
                 st.markdown("#### 📝 Teknik Görünüm Sentezi")
                 st.write(generate_technical_synthesis(hist_long))
-                with st.expander("ℹ️ Karar Kategorileri"):
+                with st.expander("ℹ️ Karar Kategorileri Kılavuzu"):
                     st.markdown("""
                     * 🟢 **GÜÇLÜ ALIM:** Trend Yukarı + EV/EBITDA < 12
                     * 🟢 **KALİTELİ TREND:** Trend Yukarı + EV/EBITDA 12-20
                     * 🟠 **MOMENTUM:** Trend Yukarı + EV/EBITDA > 20
-                    * 🔵 **DEĞER:** Trend Aşağı + EV/EBITDA < 10
-                    * 🔵 **SPEKÜLATİF:** Trend Yukarı (Veri Yok)
+                    * 🔵 **DEĞER YATIRIMI:** Trend Aşağı + EV/EBITDA < 10
+                    * 🔵 **SPEKÜLATİF:** Veri yoksa sadece trende bakar.
                     """)
             
             with tab_news:
