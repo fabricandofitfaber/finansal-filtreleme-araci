@@ -9,11 +9,11 @@ import numpy as np
 import re
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v47", layout="wide")
-st.title("📊 Akademik Karar Destek Sistemi (Hibrit Final)")
+st.set_page_config(page_title="Akademik Analiz v48", layout="wide")
+st.title("📊 Akademik Karar Destek Sistemi (Google Destekli)")
 st.markdown("""
-**Motor:** v45'in agresif hesaplama motoru (EV/EBITDA Garantisi).
-**Kasa:** v46'nın çökme koruması (NameError/Rate Limit Önlemi).
+**Yenilik:** Google News entegrasyonu (Haber Garantisi) + Sektörel Profil Oluşturucu.
+**EV/EBITDA:** Veri eksikse '0' kabul edilerek zorla hesaplanır.
 """)
 
 # --- Session State ---
@@ -57,7 +57,6 @@ def translate_to_turkish(text):
 
 # --- YARDIMCI FONKSİYONLAR ---
 def find_value_in_df(df, keywords):
-    """DataFrame içinde anahtar kelime arar ve bulduğu ilk değeri döner."""
     if df is None or df.empty: return None
     # İndeksleri string'e çevirip küçük harf yap
     df.index = df.index.map(str).str.lower()
@@ -83,8 +82,8 @@ def format_currency(val):
 def generate_news_summary(news_list):
     if not news_list: return "Yorumlanacak güncel haber akışı bulunamadı.", "gray"
     score = 0
-    pos_keywords = ['beat', 'surge', 'jump', 'gain', 'profit', 'growth', 'positive', 'up', 'high', 'partnership', 'expand', 'launch', 'approve', 'buy', 'dividend', 'strong', 'reaffirm', 'tops', 'broke out']
-    neg_keywords = ['miss', 'fall', 'drop', 'loss', 'down', 'decline', 'negative', 'low', 'lawsuit', 'investigation', 'cut', 'fail', 'weak', 'risk', 'compliance']
+    pos_keywords = ['beat', 'surge', 'jump', 'gain', 'profit', 'growth', 'positive', 'up', 'high', 'partnership', 'expand', 'launch', 'approve', 'buy', 'dividend', 'strong', 'reaffirm', 'tops', 'broke out', 'climbs']
+    neg_keywords = ['miss', 'fall', 'drop', 'loss', 'down', 'decline', 'negative', 'low', 'lawsuit', 'investigation', 'cut', 'fail', 'weak', 'risk', 'compliance', 'plunges']
     titles = " ".join([n['Title'].lower() for n in news_list])
     for word in pos_keywords:
         if word in titles: score += 1
@@ -98,7 +97,7 @@ def generate_news_summary(news_list):
 @st.cache_data(ttl=1800) 
 def generate_skeptic_analysis(ticker):
     analysis = []
-    # v46'daki gibi korumalı ama v45 mantığıyla
+    # v46/v47 gibi korumalı
     try:
         stock = yf.Ticker(ticker)
         inc = stock.income_stmt
@@ -123,7 +122,6 @@ def generate_skeptic_analysis(ticker):
 @st.cache_data(ttl=3600)
 def generate_verbal_financial_analysis(ticker):
     analysis = []
-    time.sleep(0.2) # Az bekleme
     try:
         stock = yf.Ticker(ticker)
         inc = stock.income_stmt
@@ -152,40 +150,59 @@ def generate_verbal_financial_analysis(ticker):
     except Exception: return ["Veri çekilemedi."]
     return analysis
 
-# --- FİNVİZ HABER ---
+# --- HABER & PROFİL MOTORU (GOOGLE DESTEKLİ) ---
 @st.cache_data(ttl=1800)
-def get_finviz_news_profile(ticker):
-    url = f"https://finviz.com/quote.ashx?t={ticker}"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+def get_combined_news_profile(ticker, finviz_row):
+    """Finviz -> Yahoo -> Google News Zinciri"""
     data = {"Profile": "Bulunamadı", "News": []}
+    
+    # 1. Google News (En Güvenilir Haber Kaynağı - RSS)
     try:
-        r = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        profile_td = soup.find("td", class_="fullview-profile")
-        if profile_td: 
-            raw_profile = profile_td.get_text(strip=True)
-            data["Profile"] = translate_to_turkish(raw_profile)
-        news_table = soup.find("table", id="news-table")
-        if news_table:
-            rows = news_table.find_all("tr")
-            for row in rows[:8]:
-                cols = row.find_all("td")
-                if len(cols) > 1:
-                    date_str = cols[0].get_text(strip=True)
-                    headline = cols[1].get_text(strip=True)
-                    link = cols[1].find("a")['href']
-                    data["News"].append({"Date": date_str, "Title": headline, "Link": link})
+        # RSS Feed URL (Engel yemez)
+        rss_url = f"https://news.google.com/rss/search?q={ticker}+stock&hl=en-US&gl=US&ceid=US:en"
+        r = requests.get(rss_url, timeout=3)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.content, features='xml')
+            items = soup.findAll('item')
+            for item in items[:8]:
+                title = item.title.text
+                link = item.link.text
+                pub_date = item.pubDate.text[:16] # Tarihi kısalt
+                data["News"].append({"Date": pub_date, "Title": title, "Link": link})
     except: pass
+
+    # 2. Profil Çekme (Finviz)
+    try:
+        url = f"https://finviz.com/quote.ashx?t={ticker}"
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        r = requests.get(url, headers=headers, timeout=2)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, 'html.parser')
+            profile_td = soup.find("td", class_="fullview-profile")
+            if profile_td: 
+                raw_profile = profile_td.get_text(strip=True)
+                data["Profile"] = translate_to_turkish(raw_profile)
+    except: pass
+
+    # 3. Profil Bulunamadıysa Manuel Oluştur
+    if data["Profile"] == "Bulunamadı":
+        try:
+            sec = finviz_row['Sector']
+            ind = finviz_row['Industry']
+            cnt = finviz_row['Country']
+            data["Profile"] = f"Bu şirket **{sec}** sektöründe ve **{ind}** endüstrisinde faaliyet göstermektedir. Şirket merkezi **{cnt}** ülkesindedir."
+        except: pass
+        
     return data
 
-# --- METRİKLER VE TEKNİK (BU KISIM TAMAMEN v45'TEN ALINDI) ---
+# --- METRİKLER VE TEKNİK (ZORLA HESAPLAMA) ---
 def fetch_robust_metrics(ticker):
     metrics = {'EV/EBITDA': None, 'FCF': None, 'Source': '-'}
-    ocf = 0 # FCF için OCF'yi sakla
+    ocf = 0
     try:
         stock = yf.Ticker(ticker)
         
-        # 1. FCF HESAPLAMA
+        # 1. FCF (Önceki mantık)
         try:
             cf = stock.cashflow
             if not cf.empty:
@@ -194,13 +211,11 @@ def fetch_robust_metrics(ticker):
                 capex = find_value_in_df(curr_cf, ['capital', 'capital expenditure']) or find_value_in_df(curr_cf, ['purchase', 'property']) or 0
                 if ocf != 0: metrics['FCF'] = ocf - abs(capex)
         except: pass
-        
-        # FCF Yedeği
         if metrics['FCF'] is None: 
             metrics['FCF'] = stock.info.get('freeCashflow')
-            # Eğer tablodan okuyamadıysak ve info'da da yoksa ama OCF varsa, onu kullanabiliriz ileride
-            
-        # 2. EV/EBITDA (v45 AGRESİF MANTIK)
+            if metrics['FCF'] and ocf == 0: ocf = metrics['FCF']
+
+        # 2. EV/EBITDA (ZORLA HESAPLAMA)
         
         # A) Hazır Veri
         ev_ebitda_info = stock.info.get('enterpriseToEbitda')
@@ -209,45 +224,52 @@ def fetch_robust_metrics(ticker):
             metrics['Source'] = 'Yahoo Info'
             return metrics
 
-        # B) Manuel Hesaplama (Gerekirse Parçaları Uydur)
+        # B) Manuel (Boşlukları 0 Kabul Et)
         mcap = stock.fast_info.get('market_cap')
         if mcap:
-            ev_calc = mcap # Başlangıç değeri (Borç yoksa bu kullanılır)
-            ebitda_calc = 0
+            ev_calc = mcap
+            debt = 0
+            cash = 0
             
-            # Bilanço Verisi
+            # Borç/Nakit Çek (Hata verirse 0 kalır)
             try:
                 bs = stock.balance_sheet
                 if not bs.empty:
                     curr_bs = bs.iloc[:, 0]
                     debt = find_value_in_df(curr_bs, ['total debt', 'long term debt']) or 0
                     cash = find_value_in_df(curr_bs, ['cash', 'equivalents']) or 0
-                    ev_calc = mcap + debt - cash
             except: pass
             
-            # Gelir Tablosu
+            ev_calc = mcap + debt - cash
+            
+            # EBITDA Çek
+            ebitda_calc = 0
             try:
                 inc = stock.income_stmt
                 if not inc.empty:
                     ebitda_calc = find_value_in_df(inc.iloc[:, 0], ['ebitda', 'normalized ebitda'])
                     if ebitda_calc is None:
                         op_inc = find_value_in_df(inc.iloc[:, 0], ['operating income', 'ebit']) or 0
-                        ebitda_calc = op_inc 
+                        dep = 0 # Amortismanı bulamazsan boşver
+                        ebitda_calc = op_inc + dep
             except: pass
             
-            # SURVIVOR HAMLESİ: EBITDA yoksa OCF kullan
+            # Son Çare Proxy: OCF
             if (ebitda_calc is None or ebitda_calc == 0) and ocf != 0:
                 ebitda_calc = ocf
-                metrics['Source'] = 'EV/OCF (Tahmini)'
-            else:
-                metrics['Source'] = 'Bilanço (Manuel)'
+                metrics['Source'] = 'EV/OCF (Yaklaşık)'
+            elif ebitda_calc:
+                metrics['Source'] = 'Bilanço (Tahmini)'
 
-            # SON HESAP
+            # SON HESAP (Sıfıra bölme koruması)
             if ev_calc > 0 and ebitda_calc and ebitda_calc > 0:
                 metrics['EV/EBITDA'] = ev_calc / ebitda_calc
-            elif ebitda_calc < 0:
+            elif ebitda_calc and ebitda_calc < 0:
                 metrics['EV/EBITDA'] = 0
-                metrics['Source'] = 'Zarar (Negatif EBITDA)'
+                metrics['Source'] = 'Zarar (Negatif)'
+            elif ebitda_calc == 0:
+                metrics['EV/EBITDA'] = 0
+                metrics['Source'] = 'Veri Yok'
                 
     except Exception: pass
     return metrics
@@ -275,21 +297,20 @@ def generate_technical_synthesis(hist):
     return f"{trend_txt} {mom_txt} {risk_txt}"
 
 def generate_holistic_report(ticker, finviz_row, metrics, hist):
-    if hist.empty: return
     last = hist.iloc[-1]; curr = last['Close']; ma200 = last['MA200']; evebitda = metrics.get('EV/EBITDA'); fcf = metrics.get('FCF')
     is_uptrend = curr > (ma200 if pd.notna(ma200) else 0)
     valuation = "Bilinmiyor"
     if evebitda is not None:
-        if evebitda == 0: valuation = "Negatif/Zarar"
+        if evebitda == 0: valuation = "Negatif/Zarar/Bilinmiyor"
         elif evebitda < 12: valuation = "Ucuz"
         elif evebitda <= 20: valuation = "Makul"
         else: valuation = "Pahalı"
     sentiment = "NÖTR"; color = "blue"; reason = "Veri yetersiz."
     if is_uptrend:
-        if valuation == "Ucuz": sentiment = "GÜÇLÜ ALIM"; color = "green"; reason = "Trend Yukarı + EV/EBITDA < 12 (Kelepir)"
-        elif valuation == "Makul": sentiment = "KALİTELİ TREND"; color = "green"; reason = "Trend Yukarı + EV/EBITDA 12-20 Arası"
+        if valuation == "Ucuz": sentiment = "GÜÇLÜ ALIM"; color = "green"; reason = "Trend Yukarı + EV/EBITDA < 12"
+        elif valuation == "Makul": sentiment = "KALİTELİ TREND"; color = "green"; reason = "Trend Yukarı + EV/EBITDA 12-20"
         elif valuation == "Pahalı": sentiment = "MOMENTUM (Pahalı)"; color = "orange"; reason = "Trend Yukarı + EV/EBITDA > 20"
-        else: sentiment = "SPEKÜLATİF"; color = "blue"; reason = "Trend Yukarı (Veri Yok)"
+        else: sentiment = "SPEKÜLATİF"; color = "blue"; reason = "Trend Yukarı (Değerleme Belirsiz)"
     else:
         if valuation == "Ucuz": sentiment = "DEĞER YATIRIMI"; color = "blue"; reason = "Trend Aşağı + EV/EBITDA < 10"
         elif valuation == "Pahalı": sentiment = "SAT / UZAK DUR"; color = "red"; reason = "Hem düşüşte hem pahalı."
@@ -318,7 +339,7 @@ def generate_holistic_report(ticker, finviz_row, metrics, hist):
     st.markdown("---")
 
 # --- FİNVİZ TARAYICI ---
-def get_finviz_v47(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
+def get_finviz_v48(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
     filters = []
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
     sec_map = {"Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices", "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive", "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare", "Industrials": "sec_industrials", "Real Estate": "sec_realestate", "Technology": "sec_technology", "Utilities": "sec_utilities"}
@@ -370,7 +391,7 @@ def get_finviz_v47(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val)
 # --- UI AKIŞI ---
 if st.sidebar.button("Analizi Başlat"):
     with st.spinner("Piyasa taranıyor..."):
-        df, url = get_finviz_v47(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
+        df, url = get_finviz_v48(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
         st.session_state.scan_data = df
         st.session_state.url = url
 
@@ -388,16 +409,14 @@ if not st.session_state.scan_data.empty:
         time_period = c_opt.selectbox("Süre", ["1 Ay", "3 Ay", "6 Ay", "1 Yıl", "3 Yıl", "5 Yıl"], index=3)
         tik = st.selectbox("Detaylı Analiz İçin Hisse Seç:", df['Ticker'].tolist())
         
-        # KORUMALI DEĞİŞKENLER (v46 Mimarisi)
+        # KORUMALI DEĞİŞKENLER
         hist_long = pd.DataFrame()
         adv = {}
         
         if tik:
             with st.spinner(f"{tik} detaylı analiz ediliyor..."):
                 try:
-                    # AGRESİF HESAP (v45 Motoru)
                     adv = fetch_robust_metrics(tik)
-                    
                     stock = yf.Ticker(tik)
                     hist_long = stock.history(period="5y") 
                     if not hist_long.empty:
@@ -451,7 +470,8 @@ if not st.session_state.scan_data.empty:
             with tab_news:
                 st.subheader("Şirket Profili & Haberler")
                 with st.spinner("Haberler analiz ediliyor..."):
-                    finviz_data = get_finviz_news_profile(tik)
+                    # YENİ: GOOGLE DESTEKLİ FONKSİYON
+                    finviz_data = get_combined_news_profile(tik, fin_row)
                     st.markdown("### 🏢 Şirket Profili (Türkçe)")
                     st.caption(finviz_data.get('Profile', 'Bulunamadı'))
                     
