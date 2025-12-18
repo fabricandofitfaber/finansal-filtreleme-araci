@@ -8,11 +8,11 @@ import time
 import numpy as np
 
 # --- Sayfa Ayarları ---
-st.set_page_config(page_title="Akademik Analiz v31", layout="wide")
-st.title("📊 Akademik Karar Destek Sistemi (Kesin Veri Modu)")
+st.set_page_config(page_title="Akademik Analiz v32", layout="wide")
+st.title("📊 Akademik Karar Destek Sistemi (Kılavuzlu)")
 st.markdown("""
-**Düzeltme:** EV/EBITDA verisi hazır bulunamazsa, Faaliyet Kârı + Amortisman formülüyle manuel inşa edilir.
-**Kapsam:** Tüm Piyasa + Gelişmiş Filtreler + Bütünçül Yorum.
+**Yenilik:** Seçilen döneme ait getiri analizi ve Karar Kategorileri Kılavuzu eklendi.
+**Altyapı:** v31 (Kesin Veri Modu) tabanlıdır.
 """)
 
 # --- Session State ---
@@ -44,9 +44,7 @@ def find_value_in_df(df, keywords):
     for index_name in df.index:
         name_str = str(index_name).lower()
         if all(k in name_str for k in keywords):
-            # İlk bulunanı döndür
             val = df.loc[index_name]
-            # Eğer seri dönerse (bazen olur), ilk elemanı al
             if isinstance(val, pd.Series): return val.iloc[0]
             return val
     return None
@@ -56,75 +54,56 @@ def fetch_robust_metrics(ticker):
     metrics = {'EV/EBITDA': None, 'FCF': None, 'Source': '-'}
     try:
         stock = yf.Ticker(ticker)
-        
-        # Gerekli Tabloları Çek
         try:
             mcap = stock.fast_info['market_cap']
             bs = stock.balance_sheet
             inc = stock.income_stmt
             cf = stock.cashflow
-        except:
-            return metrics # Tablo yoksa dön
+        except: return metrics 
 
         # 1. FCF HESAPLAMA
         if not cf.empty:
             curr_cf = cf.iloc[:, 0]
             ocf = find_value_in_df(curr_cf, ['operating', 'cash']) or find_value_in_df(curr_cf, ['operating', 'activities'])
             capex = find_value_in_df(curr_cf, ['capital', 'expenditure']) or find_value_in_df(curr_cf, ['purchase', 'property']) or 0
-            
             if ocf is not None:
                 metrics['FCF'] = ocf - abs(capex)
         
         # 2. EV/EBITDA HESAPLAMA
-        # A) Enterprise Value (EV) Hesabı
         ev = None
         if not bs.empty and mcap:
             curr_bs = bs.iloc[:, 0]
-            # Borç Bul (Geniş Arama)
             debt = find_value_in_df(curr_bs, ['total', 'debt'])
             if debt is None: 
-                # Parçalı topla
                 long_debt = find_value_in_df(curr_bs, ['long', 'debt']) or 0
                 short_debt = find_value_in_df(curr_bs, ['short', 'debt']) or 0
                 debt = long_debt + short_debt
-            
-            # Nakit Bul
             cash = find_value_in_df(curr_bs, ['cash', 'equivalents']) or find_value_in_df(curr_bs, ['cash']) or 0
-            
             if debt is not None:
                 ev = mcap + debt - cash
 
-        # B) EBITDA Hesabı (Zor Kısım)
         ebitda = None
         if not inc.empty:
             curr_inc = inc.iloc[:, 0]
-            # 1. Doğrudan EBITDA ara
             ebitda = find_value_in_df(curr_inc, ['normalized', 'ebitda']) or find_value_in_df(curr_inc, ['ebitda'])
-            
-            # 2. Yoksa İNŞA ET: Faaliyet Kârı + Amortisman
             if ebitda is None:
                 op_income = find_value_in_df(curr_inc, ['operating', 'income']) or find_value_in_df(curr_inc, ['operating', 'profit'])
                 depreciation = 0
                 if not cf.empty:
                     depreciation = find_value_in_df(cf.iloc[:, 0], ['depreciation']) or 0
-                
                 if op_income is not None:
                     ebitda = op_income + depreciation
                     metrics['Source'] = 'EBITDA (İnşa Edildi)'
         
-        # C) Son Bölme İşlemi
         if ev is not None and ebitda is not None and ebitda > 0:
             metrics['EV/EBITDA'] = ev / ebitda
             if metrics['Source'] == '-': metrics['Source'] = 'Bilanço (Manuel)'
             
-        # Son Çare: Hazır Veri (Eğer yukarıdakiler patlarsa)
         if metrics['EV/EBITDA'] is None:
             metrics['EV/EBITDA'] = stock.info.get('enterpriseToEbitda')
             if metrics['EV/EBITDA']: metrics['Source'] = 'Yahoo Info'
 
-    except Exception:
-        pass
-        
+    except Exception: pass
     return metrics
 
 # --- İNDİKATÖRLER ---
@@ -179,7 +158,6 @@ def generate_holistic_report(ticker, finviz_row, metrics, hist):
     fcf = metrics.get('FCF')
     
     is_uptrend = curr > (ma200 if pd.notna(ma200) else 0)
-    has_fcf = (fcf and fcf > 0)
     
     # Değerleme
     valuation = "Bilinmiyor"
@@ -195,27 +173,26 @@ def generate_holistic_report(ticker, finviz_row, metrics, hist):
     
     if is_uptrend:
         if valuation == "Ucuz":
-            sentiment = "GÜÇLÜ ALIM (Kelepir Büyüme)"
+            sentiment = "GÜÇLÜ ALIM"
             color = "green"
-            reason = "Mükemmel Kombinasyon: Hisse yükseliş trendinde ve temel olarak ucuz (EV/EBITDA < 12)."
+            reason = "Trend Yukarı + EV/EBITDA < 12 (Kelepir)"
         elif valuation == "Makul":
-            sentiment = "ALIM / TUT (Sağlıklı Trend)"
+            sentiment = "KALİTELİ TREND"
             color = "green"
-            reason = "Hisse yükseliş trendinde ve değerlemesi makul. Trend takip edilmeli."
+            reason = "Trend Yukarı + EV/EBITDA 12-20 Arası (Makul Fiyat)"
         elif valuation == "Pahalı":
-            sentiment = "MOMENTUM (Yüksek Değerleme)"
+            sentiment = "MOMENTUM (Pahalı)"
             color = "orange"
-            reason = "Trend güçlü ama fiyat temel verilerden kopmuş. Yeni giriş riskli."
+            reason = "Trend Yukarı + EV/EBITDA > 20 (Gerçekten Pahalı)"
         else:
-            sentiment = "SPEKÜLATİF TREND (Veri Eksik)"
+            sentiment = "SPEKÜLATİF"
             color = "blue"
-            reason = "Hisse yükseliyor ancak kârlılık verisi (EV/EBITDA) tam hesaplanamadı."
-            
+            reason = "Trend Yukarı (Veri Yok)"
     else: # Düşüş
         if valuation == "Ucuz":
-            sentiment = "DEĞER YATIRIMI (Uzun Vade)"
+            sentiment = "DEĞER YATIRIMI"
             color = "blue"
-            reason = "Hisse düşüş trendinde ama temel olarak çok ucuz."
+            reason = "Trend Aşağı + EV/EBITDA < 10 (Dipten Toplama)"
         elif valuation == "Pahalı":
             sentiment = "SAT / UZAK DUR"
             color = "red"
@@ -244,8 +221,8 @@ def generate_holistic_report(ticker, finviz_row, metrics, hist):
         st.write(f"• **FCF (Nakit):** {fcf_str}")
         st.write(f"• **F/K:** {finviz_row.get('P/E', '-')}")
 
-# --- FİNVİZ TARAYICI (v29 Aynı) ---
-def get_finviz_v31(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
+# --- FİNVİZ TARAYICI (v31 ile aynı) ---
+def get_finviz_v32(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val):
     filters = []
     if exc != "Any": filters.append(f"exch_{exc.lower()}")
     sec_map = {"Basic Materials": "sec_basicmaterials", "Communication Services": "sec_communicationservices", "Consumer Cyclical": "sec_consumercyclical", "Consumer Defensive": "sec_consumerdefensive", "Energy": "sec_energy", "Financial": "sec_financial", "Healthcare": "sec_healthcare", "Industrials": "sec_industrials", "Real Estate": "sec_realestate", "Technology": "sec_technology", "Utilities": "sec_utilities"}
@@ -299,7 +276,7 @@ def get_finviz_v31(limit_count, exc, sec, pe, peg, roe_val, de, rsi_val, ma_val)
 # --- UI AKIŞI ---
 if st.sidebar.button("Analizi Başlat"):
     with st.spinner("Piyasa taranıyor..."):
-        df, url = get_finviz_v31(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
+        df, url = get_finviz_v32(scan_limit, exchange, sector, pe_ratio, peg_ratio, roe, debt_eq, rsi_filter, price_ma)
         st.session_state.scan_data = df
         st.session_state.url = url
 
@@ -333,6 +310,18 @@ if not st.session_state.scan_data.empty:
                         else: slice_days = 365*5
                         hist_view = hist_long.tail(slice_days)
                         
+                        # YENİ: Dönemsel Getiri Hesaplama
+                        if not hist_view.empty:
+                            start_p = hist_view['Close'].iloc[0]
+                            end_p = hist_view['Close'].iloc[-1]
+                            ret_pct = ((end_p - start_p) / start_p) * 100
+                            
+                            # Grafiğin Üstüne Bilgi Şeridi
+                            m1, m2, m3 = st.columns(3)
+                            m1.metric("Dönem Başı", f"${start_p:.2f}")
+                            m2.metric("Dönem Sonu", f"${end_p:.2f}")
+                            m3.metric(f"{time_period} Getirisi", f"%{ret_pct:.1f}", delta=f"{ret_pct:.1f}%")
+                        
                         fig = go.Figure()
                         fig.add_trace(go.Candlestick(x=hist_view.index, open=hist_view['Open'], high=hist_view['High'], low=hist_view['Low'], close=hist_view['Close'], name='Fiyat'))
                         fig.add_trace(go.Scatter(x=hist_view.index, y=hist_view['MA50'], line=dict(color='blue', width=1), name='SMA 50'))
@@ -349,6 +338,16 @@ if not st.session_state.scan_data.empty:
             generate_holistic_report(tik, fin_row, adv, hist_long)
             st.markdown("#### 📝 Teknik Görünüm Sentezi")
             st.write(generate_technical_synthesis(hist_long))
+            
+            # YENİ: Karar Kategorileri Kılavuzu (Ekstra Bilgi)
+            with st.expander("ℹ️ Karar Kategorileri Kılavuzu (Hatırlatma)"):
+                st.markdown("""
+                * 🟢 **GÜÇLÜ ALIM:** Trend Yukarı + EV/EBITDA < 12 (Kelepir)
+                * 🟢 **KALİTELİ TREND:** Trend Yukarı + EV/EBITDA 12-20 Arası (Makul Fiyat)
+                * 🟠 **MOMENTUM (Pahalı):** Trend Yukarı + EV/EBITDA > 20 (Gerçekten Pahalı)
+                * 🔵 **DEĞER YATIRIMI:** Trend Aşağı + EV/EBITDA < 10 (Dipten Toplama)
+                * 🔵 **SPEKÜLATİF:** Veri yoksa sadece trende bakar.
+                """)
 
 elif st.session_state.scan_data.empty:
     st.info("👈 Analize başlamak için sol menüdeki **'Analizi Başlat'** butonuna basınız.")
